@@ -149,11 +149,19 @@ class MainActivity : Activity() {
         }
     }
 
+    /** All-files access exists on API 30+; older devices use legacy WRITE/READ. */
+    private fun hasStorage(): Boolean = if (android.os.Build.VERSION.SDK_INT >= 30) {
+        Environment.isExternalStorageManager()
+    } else {
+        checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
     // ══════════════ SCREEN 1: CONFIGURACIÓN ══════════════
     private fun showConfig() {
         pollJob?.cancel()
         val termuxInstalled = try { packageManager.getPackageInfo("com.termux", 0); true } catch (_: Exception) { false }
-        val hasStorage = Environment.isExternalStorageManager()
+        val hasStorage = hasStorage()
         val scriptInstalled = File(Environment.getExternalStorageDirectory(), "Android/data/com.termux/files/home/mcpanel/mc_manager.sh").exists() ||
                 (readState()?.optString("last_action", "").let { it == "bootstrap" || it == "install" })
 
@@ -169,8 +177,14 @@ class MainActivity : Activity() {
             separator(),
             row(dot(hasStorage) + " Permiso de todos los archivos", if (hasStorage) "OK" else "PENDIENTE", dotColor(hasStorage)),
             if (!hasStorage) button("CONCEDER PERMISO") {
-                try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
-                catch (_: Exception) { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
+                    catch (_: Exception) { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+                } else {
+                    requestPermissions(arrayOf(
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        android.Manifest.permission.READ_EXTERNAL_STORAGE), 1)
+                }
             } else View(this),
             separator(),
             header("ALLOW-EXTERNAL-APPS"),
