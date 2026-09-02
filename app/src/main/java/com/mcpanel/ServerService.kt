@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
+import androidx.core.app.NotificationCompat
 
 /**
  * Foreground service running mc_manager.sh inside the embedded prefix.
