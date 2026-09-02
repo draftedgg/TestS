@@ -360,7 +360,8 @@ class MainActivity : Activity() {
                 delay(2000)
                 val s = readState()
                 if (s?.optBoolean("installed") == true) { showServer(); break }
-                if (s?.optString("last_error", "").isNotEmpty() && s?.optString("last_error") != "null") break
+                val err = s?.optString("last_error", "") ?: ""
+                if (err.isNotEmpty() && err != "null") break
                 if (!isActive) break
             }
         }
