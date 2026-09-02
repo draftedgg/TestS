@@ -53,9 +53,13 @@ object Apis {
     } catch (_: Exception) { false }
 
     // ── Paper ─────────────────────────────────────────────────────────
+    private fun versionRank(v: String): List<Int> = v.split('.').map { it.toIntOrNull() ?: 0 }
+
     fun paperVersions(): List<String> = try {
-        JSONObject(get("$PAPER_API/projects/paper")).getJSONArray("versions").let { a -> (0 until a.length()).map { a.getString(it) } }
-            .filter { it.matches(Regex("""\d+\.\d+(\.\d+)?""")) }.sortedWith(compareByDescending { v -> v.split('.').map { it.toInt() } })
+        val a = JSONObject(get("$PAPER_API/projects/paper")).getJSONArray("versions")
+        (0 until a.length()).map { a.getString(it) }
+            .filter { it.matches(Regex("\\d+\\.\\d+(\\.\\d+)?")) }
+            .sortedByDescending { versionRank(it) }
     } catch (_: Exception) { emptyList() }
 
     fun paperLatestBuild(version: String): String? = try {
@@ -89,8 +93,8 @@ object Apis {
         val o = JSONObject(get(FORGE_PROMOS)).getJSONObject("promos")
         o.keys().asSequence().filter { it.endsWith("-recommended") || it.endsWith("-latest") }
             .map { it.substringBefore('-') }.distinct()
-            .filter { it.matches(Regex("""\d+\.\d+(\.\d+)?""")) }
-            .sortedWith(compareByDescending { v -> v.split('.').map { it.toInt() } }).toList()
+            .filter { it.matches(Regex("\\d+\\.\\d+(\\.\\d+)?")) }
+            .sortedByDescending { versionRank(it) }.toList()
     } catch (_: Exception) { emptyList() }
 
     fun forgeBuild(mc: String): String? = try {
@@ -104,7 +108,7 @@ object Apis {
     fun neoforgeVersions(): List<String> = try {
         val a = JSONArray(get("$NEOFORGE_MAVEN/api/maven/versions/releases/net/neoforged/neoforge"))
         (0 until a.length()).map { a.getString(it) }.filter { !it.contains("beta") && !it.contains("alpha") && !it.contains("rc") }
-            .sortedWith(compareByDescending { v -> v.split('.').map { it.toIntOrNull() ?: 0 } })
+            .sortedByDescending { versionRank(it) }
     } catch (_: Exception) { emptyList() }
 
     fun neoforgeInstallerUrl(v: String) = "$NEOFORGE_MAVEN/releases/net/neoforged/neoforge/$v/neoforge-$v-installer.jar"
