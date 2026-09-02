@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MCPanel</string><string name="configuration">CONFIGURACIÓN</string><string name="server">SERVIDOR</string><string name="create_server">CREAR SERVIDOR</string>
+    <string name="termux_missing">Termux no está instalado.</string><string name="external_apps">Ejecuta y copia este comando en Termux: echo allow-external-apps=true &gt;&gt; ~/.termux/termux.properties</string><string name="copy">COPIAR</string><string name="bootstrap">EJECUTAR BOOTSTRAP</string>
+    <string name="termux_ok">Termux instalado</string><string name="storage_ok">Almacenamiento disponible</string><string name="continue_text">CONTINUAR</string><string name="start">INICIAR</string><string name="stop">DETENER</string><string name="console">CONSOLA</string><string name="mods">MODS</string><string name="tunnel">TÚNEL</string><string name="data">DATOS</string>
+</resources>

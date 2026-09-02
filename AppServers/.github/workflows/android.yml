@@ -1,0 +1,30 @@
+name: Android release
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Build release
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Measure APK
+        run: du -h app/build/outputs/apk/release/*.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MCPanel-release
+          path: app/build/outputs/apk/release/*.apk

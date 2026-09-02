@@ -1,0 +1,28 @@
+# Checklist manual en dispositivo Android
+
+- [ ] Termux instalado desde F-Droid/GitHub, no Play Store.
+- [ ] `termux-setup-storage` completado.
+- [ ] `allow-external-apps=true` añadido y Termux reiniciado.
+- [ ] `pkg install` de curl, wget, tmux, jq, unzip y termux-api completado.
+- [ ] `~/mcpanel/mc_manager.sh status` genera `MCPanel/state.json` válido.
+- [ ] MCPanel detecta Termux instalado.
+- [ ] MCPanel abre y refleja el permiso de todos los archivos.
+- [ ] Bootstrap desde el intent completa sin TTY.
+- [ ] Paper: descarga en inbox, instala en `~/mcserver`, genera `state.json`.
+- [ ] Fabric: instalación completa y JAR vanilla presente en `libraries/`.
+- [ ] Forge: `run.sh` existe y es ejecutable.
+- [ ] NeoForge: `run.sh` existe y es ejecutable.
+- [ ] Minecraft menor de 1.17 bloqueado.
+- [ ] Iniciar crea sesión tmux `minecraft` y activa wake lock.
+- [ ] Salida aparece en `console.log` en menos de dos segundos.
+- [ ] `send` transmite comandos sin barra inicial.
+- [ ] Detener envía `stop`, espera 30 segundos y no deja Java huérfano.
+- [ ] Reiniciar funciona.
+- [ ] Búsqueda Modrinth devuelve resultados compatibles.
+- [ ] Mod/plugin instalado aparece en `mods/` o `plugins/`.
+- [ ] Eliminación de mod funciona.
+- [ ] playit inicia y muestra estado/claim.
+- [ ] Backup crea y lista `tar.gz`.
+- [ ] Eliminación del servidor exige doble confirmación en la UI final.
+- [ ] APK release y tamaño medidos.
+- [ ] Revisar visualmente fondo, colores, tipografías, separadores y ausencia de Material You.
