@@ -23,17 +23,17 @@ echo allow-external-apps=true >> ~/.termux/termux.properties
 
 ## Arquitectura
 
-La app no abre sockets, no inicia servidor HTTP y no usa WebView, JavaScript ni Compose. Descargas y consultas se realizan desde la app; ejecución y filesystem interno del servidor pertenecen a Termux. La app usa intents `com.termux.RUN_COMMAND` y lee `/sdcard/MCPanel/state.json`, `console.log` e `install.log`.
+La app no abre sockets, no inicia servidor HTTP y no usa WebView, JavaScript ni Compose. Descargas y consultas se realizan desde la app; la ejecución ocurre dentro del entorno Linux embebido (bootstrap oficial de Termux, GPLv3, incluido en el APK) en el directorio privado de la app. La app lanza `mc_manager.sh` mediante `ServerService` (servicio foreground propio) y lee `/sdcard/MCPanel/state.json`, `console.log` e `install.log`. No requiere la app de Termux.
 
 El script utiliza `~/mcserver`, nunca `/sdcard`, para ejecutar Java. Los artifacts descargados por la app entran en `MCPanel/inbox/`.
 
 ## Intent
 
-- action: `com.termux.RUN_COMMAND`
-- `com.termux.RUN_COMMAND_PATH`: `/data/data/com.termux/files/home/mcpanel/mc_manager.sh`
-- `com.termux.RUN_COMMAND_ARGUMENTS`: array de subcomando y argumentos
-- `com.termux.RUN_COMMAND_BACKGROUND`: `true`
-- `com.termux.RUN_COMMAND_WORKDIR`: `/data/data/com.termux/files/home`
+La ejecución es interna (sin intents externos):
+
+- `ServerService` lanza `<prefix>/bin/bash mc_manager.sh <subcomando> [args]` con argv array y entorno controlado.
+- `applicationId = io.mcpanel`: el bootstrap incluye rutas de 10 caracteres (`com.termux`) parcheadas byte a byte a `io.mcpanel` (misma longitud) durante la extracción. Cambiar el applicationId rompe los binarios.
+- PREFIX: `/data/data/io.mcpanel/files/usr` · HOME: `/data/data/io.mcpanel/files/home`
 
 ## Pruebas del script
 

@@ -100,7 +100,10 @@ java_pkg_for() {
 }
 
 server_running() {
-    tmux has-session -t "$TMUX_SESSION" 2>/dev/null
+    # tmux session OR a live java server process (guards against a killed
+    # tmux server leaving java alive, or state.json claiming stale truth)
+    tmux has-session -t "$TMUX_SESSION" 2>/dev/null && return 0
+    pgrep -f "java.*(mcserver|server\.jar|fabric-server-launch)" >/dev/null 2>&1
 }
 
 refresh_running_state() {
@@ -117,7 +120,7 @@ cmd_bootstrap() {
     log "INF" "bootstrap: start"
     write_state '.last_action = "bootstrap"'
     command -v jq >/dev/null 2>&1 || pkg install -y jq >> "$INSTALL_LOG" 2>&1
-    pkg install -y wget curl tmux jq unzip termux-tools >> "$INSTALL_LOG" 2>&1
+    pkg install -y wget curl tmux jq unzip procps findutils diffutils termux-tools >> "$INSTALL_LOG" 2>&1
     log "OK"  "bootstrap: base packages"
     # In the embedded (non-Termux) prefix there is no wake-lock binary;
     # the app's ServerService holds a partial wakelock while commands run.

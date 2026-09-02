@@ -1,9 +1,11 @@
 package com.mcpanel
 
 import android.app.Activity
-import android.os.Bundle
+import android.content.Intent
 import android.graphics.Color
-import android.graphics.Typeface
+import android.os.Bundle
+import android.view.View
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -15,11 +17,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
- * First-run screen: downloads the Termux bootstrap (~33 MB) into the app's
- * private storage and extracts it. Runs once; later launches skip this.
+ * First-run screen: extracts the bundled Termux bootstrap (~33 MB compressed,
+ * ~90 MB on disk, ~3700 files) into the app's private storage. No network.
+ * Runs once; later launches skip this screen.
  */
 class BootstrapActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -31,7 +33,7 @@ class BootstrapActivity : Activity() {
 
     private lateinit var status: TextView
     private lateinit var bar: ProgressBar
-    private lateinit var retry: android.widget.Button
+    private lateinit var retry: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,13 +41,13 @@ class BootstrapActivity : Activity() {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BLACK); setPadding(48, 96, 48, 32) }
         fun tv(t: String, size: Int, c: Int): TextView = TextView(this).apply { text = t; textSize = size.toFloat(); setTextColor(c); setPadding(0, 8, 0, 8) }
         col.addView(tv("PREPARANDO ENTORNO", 11, FG))
-        col.addView(tv("El entorno base de Termux viene incluido en la app. Se extrae una única vez (~90 MB en disco). No se necesita conexión.", 14, FG))
-        status = tv("", 13, MUTED); col.addView(status)
+        col.addView(tv("El entorno Linux viene incluido en la app. Se extrae una única vez en este dispositivo. No se necesita conexión.", 14, FG))
+        status = tv("Extrayendo…", 13, MUTED); col.addView(status)
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true }
         col.addView(bar)
-        retry = android.widget.Button(this).apply {
+        retry = Button(this).apply {
             text = "REINTENTAR"; setTextColor(BLACK); setBackgroundColor(ACCENT); isAllCaps = true
-            visibility = android.view.View.GONE
+            visibility = View.GONE
             setOnClickListener { install() }
         }
         col.addView(retry)
@@ -54,15 +56,20 @@ class BootstrapActivity : Activity() {
     }
 
     private fun install() {
-        retry.visibility = android.view.View.GONE
+        retry.visibility = View.GONE
         bar.isIndeterminate = true
-        status.text = "Extrayendo entorno…"
+        status.text = "Extrayendo…"
         status.setTextColor(MUTED)
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
                 try {
                     assets.open(Embed.BOOTSTRAP_ASSET).use { input ->
-                        Embed.installBootstrap(this@BootstrapActivity, input) { }
+                        Embed.installBootstrap(this@BootstrapActivity, input) { count ->
+                            if (count > 0) ui {
+                                bar.isIndeterminate = false
+                                status.text = "Extrayendo… $count archivos"
+                            }
+                        }
                     }
                 } catch (_: Exception) { false }
             }
@@ -70,13 +77,15 @@ class BootstrapActivity : Activity() {
             else {
                 status.text = "Error extrayendo el entorno. Reintenta."
                 status.setTextColor(ERROR)
-                retry.visibility = android.view.View.VISIBLE
+                retry.visibility = View.VISIBLE
             }
         }
     }
 
+    private fun ui(block: () -> Unit) { android.os.Handler(mainLooper).post(block) }
+
     private fun goMain() {
-        startActivity(android.content.Intent(this, MainActivity::class.java))
+        startActivity(Intent(this, MainActivity::class.java))
         finish()
     }
 

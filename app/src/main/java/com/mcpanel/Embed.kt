@@ -8,67 +8,110 @@ import java.util.zip.ZipInputStream
  * Embedded Linux environment (Termux bootstrap, GPLv3) inside the app's
  * private storage. No separate Termux app, no intents.
  *
- *   PREFIX = /data/data/com.mcpanel/files/usr
- *   HOME   = /data/data/com.mcpanel/files/home
+ * The applicationId is io.mcpanel on purpose: the bootstrap binaries embed
+ * /data/data/com.termux paths and com.termux / io.mcpanel are both exactly
+ * 10 characters, so every occurrence can be byte-patched in place without
+ * breaking ELF offsets or script shebangs. PREFIX must therefore be spelled
+ * exactly /data/data/io.mcpanel/files/usr everywhere.
  *
  * Bootstrap zip ships in assets/bootstrap/. Its root IS the prefix
- * (bin/, lib/, etc/ at top level) — extracted into files/usr.
+ * (bin/, lib/, etc/ at top level, plus SYMLINKS.txt) — extracted into
+ * files/usr.
  */
 object Embed {
     const val BOOTSTRAP_ASSET = "bootstrap/bootstrap-aarch64.zip"
+    const val PREFIX_PATH = "/data/data/io.mcpanel/files/usr"
+    const val HOME_PATH = "/data/data/io.mcpanel/files/home"
+
+    private val FROM = "com.termux".toByteArray(Charsets.US_ASCII)
+    private val TO = "io.mcpanel".toByteArray(Charsets.US_ASCII)
 
     fun filesDir(ctx: Context): File = ctx.getFilesDir()
-    fun prefix(ctx: Context): File = File(filesDir(ctx), "usr")
-    fun home(ctx: Context): File = File(filesDir(ctx), "home")
+    fun prefix(ctx: Context): File = File(PREFIX_PATH)
+    fun home(ctx: Context): File = File(HOME_PATH)
     fun script(ctx: Context): File = File(home(ctx), "mcpanel/mc_manager.sh")
+    fun serverDir(ctx: Context): File = File(home(ctx), "mcserver")
 
     fun isBootstrapped(ctx: Context): Boolean =
-        File(prefix(ctx), "bin/bash").exists() && File(prefix(ctx), "bin/apt").exists()
+        File(prefix(ctx), "bin/bash").exists() &&
+        File(prefix(ctx), "bin/apt").exists() &&
+        File(prefix(ctx), "bin/pkg").exists()
 
-    /** Extract the bundled bootstrap zip into files/usr with exec bits + symlinks. */
+    /** Replace every com.termux with io.mcpanel (same byte length) in place. */
+    private fun patchInPlace(b: ByteArray): Boolean {
+        var changed = false
+        val n = b.size; val m = FROM.size
+        var i = 0
+        while (i <= n - m) {
+            if (b[i] == FROM[0]) {
+                var j = 1
+                while (j < m && b[i + j] == FROM[j]) j++
+                if (j == m) {
+                    System.arraycopy(TO, 0, b, i, m)
+                    changed = true
+                    i += m
+                    continue
+                }
+            }
+            i++
+        }
+        return changed
+    }
+
+    /** Extract the bundled bootstrap zip into files/usr:
+     *  exec bits restored, every file byte-patched, symlinks rebuilt from
+     *  the zip's own SYMLINKS.txt (format: absolute-target←./relative-link). */
     fun installBootstrap(ctx: Context, zipBytes: java.io.InputStream, onProgress: (Int) -> Unit): Boolean {
         val root = prefix(ctx)
         root.mkdirs()
         try {
-            val zin = ZipInputStream(zipBytes.buffered())
             var count = 0
+            val zin = ZipInputStream(zipBytes.buffered())
             while (true) {
                 val e = zin.nextEntry ?: break
+                if (e.isDirectory) { zin.closeEntry(); continue }
+                val bytes = zin.readBytes()
+                zin.closeEntry()
+                if (e.name.contains("..") || e.name.startsWith("/")) continue // zip-slip guard
                 val out = File(root, e.name)
-                if (e.isDirectory) { out.mkdirs(); continue }
                 out.parentFile?.mkdirs()
-                zin.copyTo(out.outputStream().buffered(), 65536)
+                patchInPlace(bytes)
+                out.writeBytes(bytes)
                 val name = e.name
-                val isExec = name.startsWith("bin/") || name.endsWith(".sh") ||
-                        name.startsWith("libexec/") || name.startsWith("lib/apt/")
+                val isExec = name.startsWith("bin/") || name.startsWith("libexec/") ||
+                        name.startsWith("lib/apt/") || name.endsWith(".sh") ||
+                        name == "SYMLINKS.txt"
                 try {
-                    out.setReadable(true); out.setWritable(true)
-                    out.setExecutable(isExec, false)
+                    out.setReadable(true, false)
+                    out.setWritable(true, false)
+                    if (isExec) out.setExecutable(true, false)
                 } catch (_: Exception) {}
                 count++
-                if (count % 250 == 0) onProgress(-1)
+                if (count % 200 == 0) onProgress(count)
             }
             zin.close()
+            onProgress(count)
+            if (!File(root, "bin/bash").exists() || !File(root, "bin/apt").exists()) return false
             createSymlinks(ctx)
-            if (!File(root, "bin/bash").exists()) return false
-            writeProfile(ctx)
             File(root, "tmp").mkdirs()
+            writeProfile(ctx)
             installScript(ctx)
             return true
         } catch (_: Exception) { return false }
     }
 
-    /** Recreate symlinks from assets bootstrap SYMLINKS.txt (target←link). */
+    /** Rebuild symlinks from the extracted SYMLINKS.txt (already patched). */
     private fun createSymlinks(ctx: Context) {
+        val f = File(prefix(ctx), "SYMLINKS.txt")
+        if (!f.exists()) return
         try {
-            val txt = ctx.assets.open("bootstrap/SYMLINKS.txt").bufferedReader().readText()
-            txt.lineSequence().filter { it.contains('←') }.forEach { lineRaw ->
-                val line = lineRaw.trim()
+            f.readText().lineSequence().forEach { raw ->
+                val line = raw.trim()
                 val idx = line.indexOf('←')
                 if (idx <= 0) return@forEach
-                val targetAbs = line.substring(0, idx)
-                val linkRel = line.substring(idx + 1).removePrefix("./")
-                val target = targetAbs.replace("/data/data/com.termux/files/usr", prefix(ctx).absolutePath)
+                val target = line.substring(0, idx).trim()
+                val linkRel = line.substring(idx + 1).trim().removePrefix("./")
+                if (target.isEmpty() || linkRel.isEmpty()) return@forEach
                 val link = File(prefix(ctx), linkRel)
                 link.parentFile?.mkdirs()
                 try { link.delete() } catch (_: Exception) {}
@@ -76,7 +119,9 @@ object Embed {
                     android.system.Os.symlink(target, link.absolutePath)
                 } catch (_: Throwable) {
                     val src = File(target)
-                    if (src.exists()) try { src.copyTo(link, overwrite = true) } catch (_: Exception) {}
+                    if (src.exists() && !link.exists()) {
+                        try { src.copyTo(link, overwrite = true) } catch (_: Exception) {}
+                    }
                 }
             }
         } catch (_: Exception) {}
@@ -86,20 +131,19 @@ object Embed {
         val etcProfile = File(prefix(ctx), "etc/profile")
         etcProfile.parentFile?.mkdirs()
         if (!etcProfile.exists()) {
-            val P = prefix(ctx).absolutePath
-            val H = home(ctx).absolutePath
             etcProfile.writeText(
-                "export PREFIX=" + P + "\n" +
-                "export HOME=" + H + "\n" +
-                "export PATH=" + P + "/bin:\$PATH\n" +
-                "export TMPDIR=" + P + "/tmp\n" +
-                "export LD_PRELOAD=" + P + "/lib/libtermux-exec.so\n" +
+                "export PREFIX=" + PREFIX_PATH + "\n" +
+                "export HOME=" + HOME_PATH + "\n" +
+                "export PATH=" + PREFIX_PATH + "/bin:\$PATH\n" +
+                "export TMPDIR=" + PREFIX_PATH + "/tmp\n" +
+                "export LD_PRELOAD=" + PREFIX_PATH + "/lib/libtermux-exec-ld-preload.so\n" +
                 "export TERM=xterm-256color\n"
             )
         }
     }
 
-    /** Copy mc_manager.sh from res/raw into HOME/mcpanel/ (idempotent, on every boot). */
+    /** Copy mc_manager.sh from res/raw into HOME/mcpanel/ (on every boot so
+     *  script fixes ship with app updates). */
     fun installScript(ctx: Context) {
         val target = script(ctx)
         target.parentFile?.mkdirs()
@@ -125,15 +169,17 @@ object Embed {
             subcommand
         ) + args
         val env = mapOf(
-            "PATH" to (prefix(ctx).absolutePath + "/bin"),
-            "HOME" to home(ctx).absolutePath,
-            "TMPDIR" to (prefix(ctx).absolutePath + "/tmp"),
-            "PREFIX" to prefix(ctx).absolutePath,
+            "PATH" to (PREFIX_PATH + "/bin:/system/bin"),
+            "HOME" to HOME_PATH,
+            "TMPDIR" to (PREFIX_PATH + "/tmp"),
+            "PREFIX" to PREFIX_PATH,
+            "MC_HOME" to HOME_PATH,
             "TERM" to "xterm-256color",
-            "LD_PRELOAD" to (prefix(ctx).absolutePath + "/lib/libtermux-exec.so"),
+            "LANG" to "en_US.UTF-8",
+            "LD_PRELOAD" to (PREFIX_PATH + "/lib/libtermux-exec-ld-preload.so"),
             "ANDROID_DATA" to "/data",
             "ANDROID_ROOT" to "/system",
-            "LANG" to "en_US.UTF-8",
+            "EXTERNAL_STORAGE" to "/sdcard",
             "MC_SHARED" to (android.os.Environment.getExternalStorageDirectory().absolutePath + "/MCPanel"),
         )
         val pb = ProcessBuilder(argv)

@@ -5,7 +5,6 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
@@ -13,17 +12,13 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.view.View
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -73,7 +68,7 @@ class MainActivity : Activity() {
     }
 
     private fun header(title: String): TextView = TextView(this).apply {
-        text = title; textSize = 11f; setTextColor(FG); letterSpacing = 0.08f; typeface = Typeface.DEFAULT; setPadding(0, 12, 0, 8)
+        text = title; textSize = 11f; setTextColor(FG); letterSpacing = 0.08f; setPadding(0, 16, 0, 8)
     }
 
     private fun mono(text: String, color: Int = FG, size: Int = 13): TextView = TextView(this).apply {
@@ -112,20 +107,35 @@ class MainActivity : Activity() {
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    // ── state / intents ──────────────────────────────────────────────
+    // ── state / exec ─────────────────────────────────────────────────
     private fun readState(): JSONObject? = try { JSONObject(stateFile.readText()) } catch (_: Exception) { null }
+
+    /** org.json turns JSON null into the string "null"; treat both as empty. */
+    private fun sval(st: JSONObject?, key: String): String {
+        if (st == null) return ""
+        val s = st.optString(key, "")
+        return if (s == "null") "" else s
+    }
+
+    private fun hasError(st: JSONObject?): Boolean = sval(st, "last_error").isNotEmpty()
 
     /** Run mc_manager.sh subcommand inside the embedded prefix. */
     private fun runTermux(vararg args: String) {
-        if (!Embed.isBootstrapped(this)) { toast("Entorno no preparado. Abre de nuevo."); return }
+        if (!Embed.isBootstrapped(this)) { toast("Entorno no preparado."); return }
         val i = Intent(this, ServerService::class.java)
             .putExtra(ServerService.EXTRA_CMD, args.first())
             .putExtra(ServerService.EXTRA_ARGS, args.drop(1).toTypedArray())
         ContextCompat.startForegroundService(this, i)
     }
 
-    private fun download(url: String, name: String) {
-        val i = Intent(this, DownloadService::class.java).putExtra(DownloadService.EXTRA_URL, url).putExtra(DownloadService.EXTRA_NAME, name)
+    private fun download(url: String, name: String, afterCmd: String? = null, afterArgs: List<String>? = null) {
+        val i = Intent(this, DownloadService::class.java)
+            .putExtra(DownloadService.EXTRA_URL, url)
+            .putExtra(DownloadService.EXTRA_NAME, name)
+        if (afterCmd != null) {
+            i.putExtra(DownloadService.EXTRA_AFTER_CMD, afterCmd)
+            i.putExtra(DownloadService.EXTRA_AFTER_ARGS, afterArgs?.toTypedArray() ?: emptyArray())
+        }
         ContextCompat.startForegroundService(this, i)
         toast("Descargando $name")
     }
@@ -135,14 +145,14 @@ class MainActivity : Activity() {
         toast("Copiado.")
     }
 
-    /** Tail a file into the current output TextView until replaced or screen exits. */
+    /** Tail a file into the given TextView at 1s cadence until replaced. */
     private fun watch(target: File, out: TextView) {
         pollJob?.cancel()
         pollFile = target
         pollJob = scope.launch {
             while (isActive && pollFile === target) {
                 val s = withContext(Dispatchers.IO) { if (target.exists()) target.readText().takeLast(12000) else "" }
-                if (out.text.toString() != s) { out.text = s }
+                if (out.text.toString() != s) { out.text = s; }
                 delay(1000)
             }
         }
@@ -160,19 +170,20 @@ class MainActivity : Activity() {
     private fun showConfig() {
         pollJob?.cancel()
         val envOk = Embed.isBootstrapped(this)
-        val hasStorage = hasStorage()
+        val storageOk = hasStorage()
         val st = readState()
-        val pkgsOk = st?.optString("last_action") == "bootstrap" && st.optString("last_error").isEmpty()
-        val allOk = envOk && hasStorage && pkgsOk
+        val pkgsOk = sval(st, "last_action") == "bootstrap" && !hasError(st)
+        val allOk = envOk && storageOk && pkgsOk
+        val stInstalled = st?.optBoolean("installed") ?: false
         fun dot(ok: Boolean) = if (ok) "●" else "○"
         fun dotColor(ok: Boolean) = if (ok) ACCENT else WARN
 
         val v = screen(
             header("CONFIGURACIÓN"),
-            row(dot(envOk) + " 1. Entorno Linux embebido", if (envOk) "LISTO" else "FALTA", dotColor(envOk)),
-            mono("Incluido en la app. Se extrajo al instalar.", MUTED, 12),
-            row(dot(hasStorage) + " 2. Permiso de archivos", if (hasStorage) "LISTO" else "PENDIENTE", dotColor(hasStorage)),
-            if (!hasStorage) button("CONCEDER PERMISO") {
+            row(dot(envOk) + "  Entorno Linux", if (envOk) "LISTO" else "FALTA", dotColor(envOk)),
+            mono("Incluido en la app. Se extrajo al primer arranque.", MUTED, 12),
+            row(dot(storageOk) + "  Permiso de archivos", if (storageOk) "LISTO" else "PENDIENTE", dotColor(storageOk)),
+            if (!storageOk) button("CONCEDER PERMISO") {
                 if (android.os.Build.VERSION.SDK_INT >= 30) {
                     try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
                     catch (_: Exception) { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
@@ -182,23 +193,25 @@ class MainActivity : Activity() {
                         android.Manifest.permission.READ_EXTERNAL_STORAGE), 1)
                 }
             } else View(this),
-            row(dot(pkgsOk) + " 3. Herramientas (jq, tmux…)", if (pkgsOk) "LISTO" else "PENDIENTE", dotColor(pkgsOk)),
+            row(dot(pkgsOk) + "  Herramientas (jq, tmux, java…)", if (pkgsOk) "LISTO" else "PENDIENTE", dotColor(pkgsOk)),
             if (!pkgsOk) button("INSTALAR HERRAMIENTAS", primary = true) {
                 runTermux("bootstrap"); showBootstrapLog()
             } else View(this),
             button("VER REGISTRO") { showBootstrapLog() },
             View(this),
-            button("CONTINUAR →", primary = allOk) { showCreate() },
+            if (stInstalled) button("IR AL SERVIDOR", primary = true) { showServer() }
+            else button("CONTINUAR →", primary = allOk) {
+                if (allOk) showCreate() else toast("Completa los pasos pendientes.")
+            },
         )
         setContentView(v)
-        // auto-refresh when bootstrap finishes writing state
+        // auto-refresh while bootstrap runs
         if (!pkgsOk) scope.launch {
-            while (java.lang.Boolean.TRUE) {
+            while (isActive) {
                 delay(2000)
                 val s2 = readState()
-                val done = s2?.optString("last_action") == "bootstrap" && s2.optString("last_error").isEmpty()
+                val done = s2?.optString("last_action") == "bootstrap" && !hasError(s2)
                 if (done) { showConfig(); break }
-                if (!isActive) break
             }
         }
     }
@@ -252,9 +265,9 @@ class MainActivity : Activity() {
                     versionList.addView(mono("Sin conexión o sin versiones. Escribe la versión manual.", ERROR, 12))
                     return@launch
                 }
-                versions.forEach { v ->
-                    val t = mono(v)
-                    t.setOnClickListener { selectedVersion = v; versionInput.setText(v); highlight(versionList, t) }
+                versions.forEach { vr ->
+                    val t = mono(vr)
+                    t.setOnClickListener { selectedVersion = vr; versionInput.setText(vr); highlight(versionList, t) }
                     versionList.addView(t)
                 }
             }
@@ -269,9 +282,7 @@ class MainActivity : Activity() {
             }
             b.setOnClickListener {
                 selectedLoader = id; selectedVersion = null
-                loaders.forEach { (lid, _, _) ->
-                    loaderButtons.getChildAt(loaders.indexOfFirst { it.first == lid }).setBackgroundColor(BLACK)
-                }
+                for (i in 0 until loaderButtons.childCount) loaderButtons.getChildAt(i).setBackgroundColor(BLACK)
                 b.setBackgroundColor(PRESSED)
                 loadVersions(id); refreshRam()
             }
@@ -288,14 +299,15 @@ class MainActivity : Activity() {
             versionInput,
             header("3. RAM"),
             ramInfo,
+            View(this),
             button("INSTALAR", primary = true) {
                 val ver = versionInput.text.toString().trim()
                 if (!ver.matches(Regex("""1\.\d+(\.\d+)?"""))) { ramInfo.text = "Versión no válida."; ramInfo.setTextColor(ERROR); return@button }
-                if (!mcAtLeast(ver, "1.17")) { ramInfo.text = "MC < 1.17 no funciona bien en Termux."; ramInfo.setTextColor(ERROR); return@button }
+                if (!mcAtLeast(ver, "1.17")) { ramInfo.text = "MC < 1.17 no funciona bien en este entorno."; ramInfo.setTextColor(ERROR); return@button }
                 selectedVersion = ver
                 showCreateSummary(ver)
             },
-            button("VOLVER") { showServer(); },
+            button("VOLVER") { if (readState()?.optBoolean("installed") == true) showServer() else showConfig() },
         )
         setContentView(v)
     }
@@ -316,13 +328,13 @@ class MainActivity : Activity() {
             View(this),
             button("CONFIRMAR E INSTALAR", primary = true) {
                 val loader = selectedLoader
-                // descargas en la app a inbox; el script consume inbox primero
+                // app downloads artifacts into inbox/; script consumes inbox first.
+                // If the app-side lookup fails, the script downloads by itself.
                 scope.launch {
                     when (loader) {
                         "paper" -> {
                             val build = withContext(Dispatchers.IO) { Apis.paperLatestBuild(version) }
-                            if (build == null) { runTermux("install", "--loader", loader, "--version", version); return@launch }
-                            download(Apis.paperJarUrl(version, build), "paper-$version-$build.jar")
+                            if (build != null) download(Apis.paperJarUrl(version, build), "paper-$version-$build.jar")
                             runTermux("install", "--loader", loader, "--version", version)
                         }
                         "fabric" -> {
@@ -354,15 +366,12 @@ class MainActivity : Activity() {
         val out = mono("")
         val v = screen(header("INSTALANDO SERVIDOR"), out, button("IR AL SERVIDOR") { showServer() })
         setContentView(v); watch(installLog, out)
-        // auto-jump to server screen when install completes
         scope.launch {
             while (isActive) {
                 delay(2000)
                 val s = readState()
                 if (s?.optBoolean("installed") == true) { showServer(); break }
-                val err = s?.optString("last_error", "") ?: ""
-                if (err.isNotEmpty() && err != "null") break
-                if (!isActive) break
+                if (hasError(s) && s?.optString("last_action") == "error") break
             }
         }
     }
@@ -371,37 +380,60 @@ class MainActivity : Activity() {
     private fun showServer(tab: String = "status") {
         pollJob?.cancel()
         val st = readState()
-        val running = st?.optBoolean("running") ?: false
-        val installed = st?.optBoolean("installed") ?: false
+        if (st?.optBoolean("installed") != true) { showConfig(); return }
+        val running = st.optBoolean("running")
 
         val statusLine = mono(
-            "loader  ${st?.optString("loader") ?: "—"}\n" +
-            "vers    ${st?.optString("version") ?: "—"}\n" +
+            "loader  ${sval(st, "loader")}\n" +
+            "vers    ${sval(st, "version")}\n" +
             "estado  ${if (running) "● ACTIVO" else "○ DETENIDO"}\n" +
-            "ram     ${st?.optString("ram_min") ?: "—"}/${st?.optString("ram_max") ?: "—"}\n" +
-            "puerto  ${st?.optInt("port", 25565) ?: 25565}\n" +
-            "playit  ${st?.optString("playit", null)?.let { JSONObject(it).optString("address", "—") } ?: "—"}",
+            "ram     ${sval(st, "ram_min")}/${sval(st, "ram_max")}\n" +
+            "puerto  ${if (st.has("port")) st.optInt("port", 25565) else 25565}\n" +
+            "playit  ${st.optJSONObject("playit")?.optString("address")?.takeIf { it.isNotEmpty() && it != "null" } ?: "—"}",
             if (running) ACCENT else FG
         )
 
         val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val err = sval(st, "last_error")
+        if (err.isNotEmpty()) body.addView(mono("error: $err", ERROR, 12))
 
         val v = screen(
             header("SERVIDOR"),
             statusLine,
-            button(if (running) "DETENER" else "INICIAR", primary = true) { runTermux(if (running) "stop" else "start") },
+            button(if (running) "DETENER" else "INICIAR", primary = true) {
+                runTermux(if (running) "stop" else "start")
+                scope.launch { delay(1500); showServer(tab) }
+            },
             tabsRow(tab) { showServer(it) },
             body,
         )
+        var consoleOut: TextView? = null
         when (tab) {
-            "console" -> consoleTab(body)
-            "mods" -> modsTab(body, st?.optString("loader") ?: "paper", st?.optString("version") ?: "")
+            "console" -> consoleOut = consoleTab(body)
+            "mods" -> modsTab(body, sval(st, "loader"), sval(st, "version"))
             "tunnel" -> tunnelTab(body, st)
             "data" -> dataTab(body)
-            else -> body.addView(mono("Servidor detenido.", MUTED).takeIf { !running } ?: mono(""))
+            else -> { /* status only */ }
         }
         setContentView(v)
-        if (tab == "console") watch(consoleLog, findOutput(body))
+        if (tab == "console") consoleOut?.let { watch(consoleLog, it) }
+        // status tab: poll state.json so ● and playit stay fresh
+        if (tab == "status") scope.launch {
+            while (isActive) {
+                delay(2000)
+                val s2 = readState()
+                if (s2 == null) continue
+                val r2 = s2.optBoolean("running")
+                statusLine.text =
+                    "loader  ${sval(s2, "loader")}\n" +
+                    "vers    ${sval(s2, "version")}\n" +
+                    "estado  ${if (r2) "● ACTIVO" else "○ DETENIDO"}\n" +
+                    "ram     ${sval(s2, "ram_min")}/${sval(s2, "ram_max")}\n" +
+                    "puerto  ${if (s2.has("port")) s2.optInt("port", 25565) else 25565}\n" +
+                    "playit  ${s2.optJSONObject("playit")?.optString("address")?.takeIf { it.isNotEmpty() && it != "null" } ?: "—"}"
+                statusLine.setTextColor(if (r2) ACCENT else FG)
+            }
+        }
     }
 
     private fun tabsRow(current: String, onClick: (String) -> Unit): View {
@@ -419,28 +451,23 @@ class MainActivity : Activity() {
         return r
     }
 
-    private fun findOutput(root: LinearLayout): TextView {
-        for (i in 0 until root.childCount) {
-            val c = root.getChildAt(i)
-            if (c is TextView && c.typeface == Typeface.MONOSPACE) return c
-        }
-        return mono("")
-    }
-
-    private fun consoleTab(body: LinearLayout) {
+    private fun consoleTab(body: LinearLayout): TextView {
         val out = mono("")
         val input = EditText(this).apply { hint = "comando (sin /)"; setTextColor(FG); setHintTextColor(MUTED); typeface = Typeface.MONOSPACE; textSize = 13f }
-        body.addView(out, LinearLayout.LayoutParams(-1, 0, 1f))
+        body.addView(out, LinearLayout.LayoutParams(-1, 600))
         body.addView(input)
-        body.addView(button("ENVIAR") { val c = input.text.toString().trim(); if (c.isNotEmpty()) runTermux("send", c); input.setText("") })
+        body.addView(button("ENVIAR") {
+            val c = input.text.toString().trim()
+            if (c.isNotEmpty()) { runTermux("send", c); input.setText("") }
+        })
+        return out
     }
 
     private fun modsTab(body: LinearLayout, loader: String, mcVersion: String) {
         if (mcVersion.isEmpty()) { body.addView(mono("Instala un servidor primero.", WARN, 12)); return }
         val query = EditText(this).apply { hint = "buscar en Modrinth"; setTextColor(FG); setHintTextColor(MUTED); textSize = 13f }
         val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val installedDir = if (loader == "paper") File(Environment.getExternalStorageDirectory(), "Android/data/com.termux/files/home/mcserver/plugins")
-                           else File(Environment.getExternalStorageDirectory(), "Android/data/com.termux/files/home/mcserver/mods")
+        val dest = Embed.serverDir(this).let { if (loader == "paper") File(it, "plugins") else File(it, "mods") }
 
         body.addView(header("BÚSQUEDA MODRINTH"))
         body.addView(query)
@@ -449,7 +476,7 @@ class MainActivity : Activity() {
             scope.launch {
                 val hits = withContext(Dispatchers.IO) { Apis.modrinthSearch(query.text.toString().trim(), mcVersion, loader) }
                 results.removeAllViews()
-                if (hits.isEmpty()) results.addView(mono("Sin resultados.", MUTED, 12))
+                if (hits.isEmpty()) { results.addView(mono("Sin resultados.", MUTED, 12)); return@launch }
                 hits.forEach { h ->
                     val r = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; setBackgroundColor(BLACK); setPadding(0, 8, 0, 8) }
                     r.addView(LinearLayout(this@MainActivity).apply {
@@ -457,11 +484,10 @@ class MainActivity : Activity() {
                         addView(mono(h.title, FG)); addView(mono(h.description.take(60), MUTED, 11))
                     }, LinearLayout.LayoutParams(0, -2, 1f))
                     r.addView(button("INSTALAR") {
-                        toast("Buscando archivo…")
                         scope.launch {
                             val url = withContext(Dispatchers.IO) { Apis.modrinthDownloadUrl(h.slug, mcVersion, loader) }
                             if (url == null) toast("Sin versión compatible.")
-                            else download(url, url.substringAfterLast('/'))
+                            else download(url, url.substringAfterLast('/'), "mod-install", listOf(url.substringAfterLast('/')))
                         }
                     })
                     results.addView(r); results.addView(separator())
@@ -471,21 +497,37 @@ class MainActivity : Activity() {
         body.addView(header("RESULTADOS")); body.addView(results)
 
         body.addView(header("INSTALADOS"))
-        val installedList = mono(
-            if (installedDir.exists()) installedDir.listFiles()?.joinToString("\n") { it.name } ?: "(vacío)" else "(sin datos — se instala al mover desde inbox)",
-            MUTED, 12)
-        body.addView(installedList)
+        val listText = StringBuilder()
+        val files = if (dest.exists()) dest.listFiles()?.sortedBy { it.name } else null
+        if (files.isNullOrEmpty()) listText.append("(vacío)")
+        else files.forEach { listText.append(it.name).append('\n') }
+        // inbox items pending mod-install
+        if (inbox.exists()) {
+            val pending = inbox.listFiles()?.filter { it.name.endsWith(".jar") } ?: emptyList()
+            if (pending.isNotEmpty()) {
+                listText.append("\nen cola (inbox):\n")
+                pending.forEach { listText.append(it.name).append('\n') }
+                body.addView(mono(listText.toString(), MUTED, 12))
+                body.addView(button("INSTALAR COLA") {
+                    pending.forEach { runTermux("mod-install", it.name) }
+                    scope.launch { delay(2500); showServer("mods") }
+                })
+                return
+            }
+        }
+        body.addView(mono(listText.toString(), MUTED, 12))
+        body.addView(button("ACTUALIZAR") { showServer("mods") })
     }
 
-    private fun tunnelTab(body: LinearLayout, st: JSONObject?) {
-        val playit = st?.optJSONObject("playit")
-        body.addView(row("playit", if (playit?.optBoolean("running") == true) "● ACTIVO" else "○ DETENIDO",
-            if (playit?.optBoolean("running") == true) ACCENT else MUTED))
-        body.addView(mono("Dirección: ${playit?.optString("address") ?: "—"}", MUTED, 12))
-        body.addView(button("INICIAR TÚNEL") { runTermux("playit-start") })
+    private fun tunnelTab(body: LinearLayout, st: JSONObject) {
+        val playit = st.optJSONObject("playit")
+        val pRunning = playit?.optBoolean("running") == true
+        val addr = playit?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" }
+        body.addView(row("playit", if (pRunning) "● ACTIVO" else "○ DETENIDO", if (pRunning) ACCENT else MUTED))
+        body.addView(mono("Dirección: ${addr ?: "—"}", MUTED, 12))
+        body.addView(button(if (pRunning) "REINICIAR TÚNEL" else "INICIAR TÚNEL") { runTermux("playit-start") })
         body.addView(button("ACTUALIZAR ESTADO") { runTermux("playit-status"); scope.launch { delay(1500); showServer("tunnel") } })
-        val claim = playit?.optString("address", "") ?: ""
-        if (claim.startsWith("http")) body.addView(button("ABRIR CLAIM EN NAVEGADOR") { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(claim))) })
+        if (addr != null && addr.startsWith("http")) body.addView(button("ABRIR CLAIM EN NAVEGADOR") { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(addr))) })
     }
 
     private fun dataTab(body: LinearLayout) {
@@ -517,10 +559,10 @@ class MainActivity : Activity() {
     }
 
     // ── helpers ──────────────────────────────────────────────────────
-    private fun ramMB(): Int {
+    private fun ramMB(): Int = try {
         val mi = java.io.RandomAccessFile("/proc/meminfo", "r").readLine().split(Regex("\\s+"))
-        return (mi[1].toLong() / 1024).toInt()
-    }
+        (mi[1].toLong() / 1024).toInt()
+    } catch (_: Exception) { 2048 }
 
     private fun ramPreset(totalMB: Int): Pair<String, String> = when {
         totalMB >= 8192 -> "1G" to "4G"

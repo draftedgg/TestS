@@ -21,15 +21,21 @@ case "${1:-}" in
   has-session) [ -f "$marker" ] && exit 0 || exit 1 ;;
   new-session) mkdir -p "$(dirname "$marker")"; touch "$marker"; exit 0 ;;
   kill-session) rm -f "$marker"; exit 0 ;;
-  send-keys|pipe-pane|list-sessions) exit 0 ;;
+  send-keys|pipe-pane|list-sessions)
+    # simulate graceful shutdown: 'stop' ends the session
+    for a in "$@"; do [ "$a" = "stop" ] && rm -f "$marker"; done
+    exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
 chmod +x "$STUB/tmux"
-for cmd in pkg termux-wake-lock termux-wake-unlock pgrep pkill; do
+for cmd in pkg termux-wake-lock termux-wake-unlock; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/$cmd"
   chmod +x "$STUB/$cmd"
 done
+# pgrep: only "finds java" when MC_JAVA_PID is set (tests the server_running fallback)
+printf '#!/usr/bin/env bash\n[ -n "${MC_JAVA_PID:-}" ] && exit 0 || exit 1\n' > "$STUB/pgrep"; chmod +x "$STUB/pgrep"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/pkill"; chmod +x "$STUB/pkill"
 cat > "$STUB/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' '{"builds":[{"build":1}]}'
@@ -80,6 +86,11 @@ run start
 run stop
 [ "$(jq -r '.running' "$STATE")" = false ] && PASS "stop state" || FAIL "stop state"
 [ "$(jq -r '.started_at' "$STATE")" = null ] && PASS "stop timestamp cleared" || FAIL "stop timestamp"
+# server_running fallback: live java process without tmux session
+MC_JAVA_PID=1 run status
+[ "$(jq -r '.running' "$STATE")" = true ] && PASS "java fallback detected" || FAIL "java fallback"
+MC_JAVA_PID= run status
+[ "$(jq -r '.running' "$STATE")" = false ] && PASS "no java no session stopped" || FAIL "stopped fallback"
 run send "say hi"
 echo "$(jq -r '.last_error' "$STATE")" | grep -q 'not running' && PASS "send stopped rejects" || FAIL "send stopped"
 run frobnicate
