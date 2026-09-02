@@ -20,8 +20,16 @@ jobs:
         with:
           gradle-version: '8.7'
       - name: Build release
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log || true
+          if [ ! -f app/build/outputs/apk/release/app-release.apk ] && [ ! -f app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+            tail -n 120 build.log >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          tail -n 6 build.log >> "$GITHUB_STEP_SUMMARY"
       - name: Measure APK
+        if: success()
         run: du -h app/build/outputs/apk/release/*.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
