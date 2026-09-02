@@ -20,9 +20,33 @@ import java.util.zip.ZipInputStream
  * files/usr.
  */
 object Embed {
-    const val BOOTSTRAP_ASSET = "bootstrap/bootstrap-aarch64.zip"
+    const val BOOTSTRAP_AARCH64 = "bootstrap/bootstrap-aarch64.zip"
+    const val BOOTSTRAP_ARM = "bootstrap/bootstrap-arm.zip"
     const val PREFIX_PATH = "/data/data/io.mcpanel/files/usr"
     const val HOME_PATH = "/data/data/io.mcpanel/files/home"
+
+    /** Pick the bootstrap matching the device. 32-bit-only devices are the
+     *  common case where an aarch64 bootstrap silently fails to exec. */
+    fun bootstrapAsset(): String {
+        for (abi in android.os.Build.SUPPORTED_ABIS) {
+            when (abi) {
+                "arm64-v8a" -> return BOOTSTRAP_AARCH64
+                "armeabi-v7a", "armeabi", "armv8l" -> return BOOTSTRAP_ARM
+            }
+        }
+        return BOOTSTRAP_AARCH64
+    }
+
+    fun deviceAbi(): String =
+        android.os.Build.SUPPORTED_ABIS.joinToString(" ")
+
+    fun bootstrapSupported(): Boolean =
+        android.os.Build.SUPPORTED_ABIS.any {
+            it == "arm64-v8a" || it == "armeabi-v7a" || it == "armeabi" || it == "armv8l"
+        }
+
+    private fun is64BitAbi(): Boolean =
+        android.os.Build.SUPPORTED_ABIS.any { it == "arm64-v8a" || it == "x86_64" }
 
     private val FROM = "com.termux".toByteArray(Charsets.US_ASCII)
     private val TO = "io.mcpanel".toByteArray(Charsets.US_ASCII)
@@ -33,10 +57,66 @@ object Embed {
     fun script(ctx: Context): File = File(home(ctx), "mcpanel/mc_manager.sh")
     fun serverDir(ctx: Context): File = File(home(ctx), "mcserver")
 
-    fun isBootstrapped(ctx: Context): Boolean =
-        File(prefix(ctx), "bin/bash").exists() &&
-        File(prefix(ctx), "bin/apt").exists() &&
-        File(prefix(ctx), "bin/pkg").exists()
+    /** ELF magic check (returns EI_CLASS: 0=invalid, 1=32-bit, 2=64-bit). */
+    private fun elfClass(f: File): Int = try {
+        f.inputStream().use { s ->
+            val h = ByteArray(6)
+            if (s.read(h) < 6 || h[0] != 0x7F.toByte() || h[1] != 'E'.code.toByte()) 0
+            else h[4].toInt() and 0xFF
+        }
+    } catch (_: Exception) { 0 }
+
+    /** Find the ELF interpreter string (PT_INTERP) in the first 8 KB. */
+    private fun elfInterp(f: File): String? = try {
+        f.inputStream().use { s ->
+            val buf = ByteArray(8192)
+            val n = s.read(buf)
+            if (n <= 0) null
+            else {
+                var i = 0
+                var found: String? = null
+                while (i < n - 1 && found == null) {
+                    if (buf[i] == '/'.code.toByte()) {
+                        var j = i
+                        while (j < n && buf[j] != 0.toByte()) j++
+                        val str = String(buf, i, j - i, Charsets.US_ASCII)
+                        if (str.startsWith("/system/bin/linker") || str.startsWith("/data/")) found = str
+                        i = j + 1
+                    } else i++
+                }
+                found
+            }
+        }
+    } catch (_: Exception) { null }
+
+    /**
+     * True only if bash AND apt exist AND are ELF files matching this
+     * device's bitness with an interpreter that exists. A wrong-arch
+     * extraction (e.g. aarch64 bootstrap on a 32-bit device) execs with
+     * ENOENT even though the file is there — this probe catches it and
+     * lets BootstrapActivity re-extract the correct one.
+     */
+    fun isBootstrapped(ctx: Context): Boolean {
+        val bash = File(prefix(ctx), "bin/bash")
+        if (!bash.exists() || !File(prefix(ctx), "bin/apt").exists()) return false
+        val cls = elfClass(bash)
+        if (cls == 0) return false
+        if (cls != (if (is64BitAbi()) 2 else 1)) return false
+        val interp = elfInterp(bash) ?: return false
+        return File(interp).exists()
+    }
+
+    /** Human-readable verdict of the bash binary, for diagnostics. */
+    fun bashDiag(ctx: Context): String {
+        val bash = File(prefix(ctx), "bin/bash")
+        if (!bash.exists()) return "bash: no existe"
+        val cls = elfClass(bash)
+        val interp = elfInterp(bash)
+        return "bash: " + bash.length() + " bytes, ELF clase=" + cls +
+                " (dispositivo " + (if (is64BitAbi()) "64" else "32") + " bit), " +
+                "intérprete=" + (interp ?: "ninguno") +
+                " (¿existe?: " + (interp != null && File(interp).exists()) + ")"
+    }
 
     /**
      * Shared dir: /sdcard/MCPanel if external storage is readable, else
@@ -87,8 +167,10 @@ object Embed {
     /** Extract the bundled bootstrap zip into files/usr:
      *  exec bits restored, every file byte-patched, symlinks rebuilt from
      *  the zip's own SYMLINKS.txt (format: absolute-target←./relative-link). */
-    fun installBootstrap(ctx: Context, zipBytes: java.io.InputStream, onProgress: (Int) -> Unit): Boolean {
+    fun installBootstrap(ctx: Context, zipBytes: java.io.InputStream, onProgress: (Int) -> Unit, marker: String? = null): Boolean {
         val root = prefix(ctx)
+        // Wipe any previous/partial/mixed-arch extraction before re-extracting.
+        try { root.deleteRecursively() } catch (_: Exception) {}
         root.mkdirs()
         try {
             var count = 0
@@ -122,6 +204,7 @@ object Embed {
             File(root, "tmp").mkdirs()
             writeProfile(ctx)
             installScript(ctx)
+            if (marker != null) try { File(root, marker).writeText(deviceAbi()) } catch (_: Exception) {}
             return true
         } catch (_: Exception) { return false }
     }
@@ -197,6 +280,17 @@ object Embed {
         }
         if (!bash.exists()) {
             diag("ERROR: bash no existe en ${bash.absolutePath} — el entorno no se extrajo correctamente")
+            return -1
+        }
+        // Wrong-arch bootstrap execs with ENOENT although the file exists.
+        val cls = elfClass(bash)
+        val wantCls = if (is64BitAbi()) 2 else 1
+        val interp = elfInterp(bash)
+        if (cls != wantCls || interp == null || !File(interp).exists()) {
+            diag("DIAGNÓSTICO: " + bashDiag(ctx))
+            diag("ABIs del dispositivo: " + deviceAbi())
+            diag("CONCLUSIÓN: el bootstrap extraído no corresponde a la arquitectura de este dispositivo (exec devuelve ENOENT).")
+            diag("SOLUCIÓN: desinstala la app y reinstala la última versión (selección automática de arquitectura).")
             return -1
         }
         val argv = mutableListOf(
