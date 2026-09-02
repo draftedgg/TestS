@@ -63,15 +63,15 @@ object Embed {
             val etcProfile = File(prefix(ctx), "etc/profile")
             etcProfile.parentFile?.mkdirs()
             if (!etcProfile.exists()) {
+                val P = prefix(ctx).absolutePath
+                val H = home(ctx).absolutePath
                 etcProfile.writeText(
-                    """
-                    export PREFIX=${prefix(ctx).absolutePath}
-                    export HOME=${home(ctx).absolutePath}
-                    export PATH=${prefix(ctx).absolutePath}/bin:\$PATH
-                    export TMPDIR=${prefix(ctx).absolutePath}/tmp
-                    export LD_PRELOAD=${prefix(ctx).absolutePath}/lib/libtermux-exec.so
-                    export TERM=xterm-256color
-                    """.trimIndent() + "\n"
+                    "export PREFIX=" + P + "\n" +
+                    "export HOME=" + H + "\n" +
+                    "export PATH=" + P + "/bin:\$PATH\n" +
+                    "export TMPDIR=" + P + "/tmp\n" +
+                    "export LD_PRELOAD=" + P + "/lib/libtermux-exec.so\n" +
+                    "export TERM=xterm-256color\n"
                 )
             }
             File(prefix(ctx), "tmp").mkdirs()
@@ -97,8 +97,9 @@ object Embed {
         )
         val pb = ProcessBuilder(listOf(bash.absolutePath, "-c", command) + args)
         pb.directory(home(ctx))
-        pb.environment().clear()
-        pb.environment().putAll(env)
+        val pe = pb.environment()
+        pe.clear()
+        env.forEach { kv -> val i2 = kv.indexOf('='); if (i2 > 0) pe[kv.substring(0, i2)] = kv.substring(i2 + 1) }
         pb.redirectErrorStream(true)
         val p = try { pb.start() } catch (_: Exception) { return -1 }
         if (onLine != null) {
