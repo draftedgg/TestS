@@ -13,7 +13,7 @@ import java.util.zip.ZipInputStream
  *   HOME   = /data/data/com.mcpanel/files/home
  *
  * Bootstrap zip: termux/termux-packages releases (apt.android-7 variant).
- * It contains ./usr/* paths; we extract into files/ so usr lands correctly.
+ * It contains usr/ paths; we extract into files/ so usr lands correctly.
  */
 object Embed {
     const val BOOTSTRAP_TAG = "bootstrap-2026.08.30-r1+apt.android-7"
@@ -45,8 +45,7 @@ object Embed {
                 if (e.isDirectory) { out.mkdirs(); continue }
                 out.parentFile?.mkdirs()
                 zin.copyTo(out.outputStream().buffered(), 65536)
-                // Termux bootstrap stores mode in name suffix "@mode"; default sane:
-                // bin/* and *.sh executable, rest 0600/0644 by path.
+                // Exec bits: bootstrap stores mode in name suffix; default sane here.
                 val name = e.name
                 val isExec = name.startsWith("usr/bin/") || name.endsWith(".sh") ||
                         name.startsWith("usr/lib/apt/") && name.contains("methods")
