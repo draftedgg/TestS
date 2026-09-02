@@ -183,38 +183,66 @@ object Embed {
     /**
      * Run the manager script with an argv array (no -c quoting pitfalls):
      *   <prefix>/bin/bash <script> <subcommand> [args...]
-     * Blocks; returns exit code; streams output lines if requested.
+     * Blocks; returns exit code (-1 = could not start; reason is appended
+     * to last_run.log). Streams output lines if requested.
      */
     fun runManager(ctx: Context, subcommand: String, args: List<String> = emptyList(), onLine: ((String) -> Unit)? = null): Int {
         installScript(ctx)
+        File(HOME_PATH).mkdirs()
+        File(prefix(ctx), "tmp").mkdirs()
         val bash = File(prefix(ctx), "bin/bash")
-        if (!bash.exists()) return -1
+        val log = lastRunLog(ctx)
+        fun diag(msg: String) {
+            try { log.parentFile?.mkdirs(); log.appendText("[DIAG] $msg\n") } catch (_: Exception) {}
+        }
+        if (!bash.exists()) {
+            diag("ERROR: bash no existe en ${bash.absolutePath} — el entorno no se extrajo correctamente")
+            return -1
+        }
         val argv = mutableListOf(
             bash.absolutePath,
             script(ctx).absolutePath,
             subcommand
         ) + args
-        val env = mapOf(
-            "PATH" to (PREFIX_PATH + "/bin:/system/bin"),
-            "HOME" to HOME_PATH,
-            "TMPDIR" to (PREFIX_PATH + "/tmp"),
-            "PREFIX" to PREFIX_PATH,
-            "MC_HOME" to HOME_PATH,
-            "TERM" to "xterm-256color",
-            "LANG" to "en_US.UTF-8",
-            "LD_PRELOAD" to (PREFIX_PATH + "/lib/libtermux-exec-ld-preload.so"),
-            "ANDROID_DATA" to "/data",
-            "ANDROID_ROOT" to "/system",
-            "EXTERNAL_STORAGE" to "/sdcard",
-            "MC_SHARED" to sharedDir(ctx).absolutePath,
-        )
-        val pb = ProcessBuilder(argv)
-        pb.directory(home(ctx))
-        val pe = pb.environment()
-        pe.clear()
-        pe.putAll(env)
-        pb.redirectErrorStream(true)
-        val p = try { pb.start() } catch (_: Exception) { return -1 }
+        fun makePb(withPreload: Boolean): ProcessBuilder {
+            val pb = ProcessBuilder(argv)
+            pb.directory(home(ctx))
+            val pe = pb.environment()
+            // keep system env, overlay ours (some OEMs need system vars)
+            pe["PATH"] = PREFIX_PATH + "/bin:/system/bin"
+            pe["LD_LIBRARY_PATH"] = PREFIX_PATH + "/lib"
+            pe["HOME"] = HOME_PATH
+            pe["TMPDIR"] = PREFIX_PATH + "/tmp"
+            pe["PREFIX"] = PREFIX_PATH
+            pe["MC_HOME"] = HOME_PATH
+            pe["TERM"] = "xterm-256color"
+            pe["LANG"] = "en_US.UTF-8"
+            if (withPreload) pe["LD_PRELOAD"] = PREFIX_PATH + "/lib/libtermux-exec-ld-preload.so" else pe.remove("LD_PRELOAD")
+            pe["ANDROID_DATA"] = "/data"
+            pe["ANDROID_ROOT"] = "/system"
+            pe["EXTERNAL_STORAGE"] = "/sdcard"
+            pe["MC_SHARED"] = sharedDir(ctx).absolutePath
+            pb.redirectErrorStream(true)
+            return pb
+        }
+        // attempt 1: with LD_PRELOAD (Termux standard); attempt 2: without it
+        // (a failing preload lib aborts exec on strict linkers)
+        var p: Process? = null
+        var lastErr: Exception? = null
+        for (attempt in 1..2) {
+            try {
+                p = makePb(attempt == 1).start()
+                if (attempt == 2) diag("arrancó sin LD_PRELOAD (el intento 1 falló)")
+                break
+            } catch (e: Exception) {
+                lastErr = e
+                diag("intento $attempt: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        if (p == null) {
+            diag("ERROR: no se pudo ejecutar el proceso. Causa más probable: permiso de ejecución denegado por el sistema (reinstala la app y concede todos los permisos) o binario corrupto.")
+            return -1
+        }
         if (onLine != null) {
             p.inputStream.bufferedReader().forEachLine { onLine(it) }
         }
