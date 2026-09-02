@@ -92,7 +92,7 @@ object Embed {
             etcProfile.writeText(
                 "export PREFIX=" + P + "\n" +
                 "export HOME=" + H + "\n" +
-                "export PATH=" + P + "/bin:$PATH\n" +
+                "export PATH=" + P + "/bin:\$PATH\n" +
                 "export TMPDIR=" + P + "/tmp\n" +
                 "export LD_PRELOAD=" + P + "/lib/libtermux-exec.so\n" +
                 "export TERM=xterm-256color\n"
