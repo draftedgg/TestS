@@ -1,6 +1,7 @@
 package com.mcpanel
 
 import android.content.Context
+import android.os.Environment
 import java.io.File
 import java.util.zip.ZipInputStream
 
@@ -36,6 +37,31 @@ object Embed {
         File(prefix(ctx), "bin/bash").exists() &&
         File(prefix(ctx), "bin/apt").exists() &&
         File(prefix(ctx), "bin/pkg").exists()
+
+    /**
+     * Shared dir: /sdcard/MCPanel if external storage is readable, else
+     * app-private Android/data/io.mcpanel/files/MCPanel (script gets the
+     * resolved path via MC_SHARED, never a blind /sdcard path).
+     */
+    fun sharedDir(ctx: Context): File {
+        val sd = Environment.getExternalStorageDirectory()
+        if (sd != null) {
+            val probe = File(sd, "MCPanel/.probe")
+            return try {
+                probe.parentFile?.mkdirs()
+                if (probe.createNewFile() || probe.exists()) {
+                    probe.delete()
+                    File(sd, "MCPanel")
+                } else File(ctx.getExternalFilesDir(null) ?: filesDir(ctx), "MCPanel")
+            } catch (_: Exception) {
+                File(ctx.getExternalFilesDir(null) ?: filesDir(ctx), "MCPanel")
+            }
+        }
+        return File(ctx.getExternalFilesDir(null) ?: filesDir(ctx), "MCPanel")
+    }
+
+    /** Where ServerService captures every script run (stdout+stderr+exit). */
+    fun lastRunLog(ctx: Context): File = File(sharedDir(ctx), "last_run.log")
 
     /** Replace every com.termux with io.mcpanel (same byte length) in place. */
     private fun patchInPlace(b: ByteArray): Boolean {
@@ -180,7 +206,7 @@ object Embed {
             "ANDROID_DATA" to "/data",
             "ANDROID_ROOT" to "/system",
             "EXTERNAL_STORAGE" to "/sdcard",
-            "MC_SHARED" to (android.os.Environment.getExternalStorageDirectory().absolutePath + "/MCPanel"),
+            "MC_SHARED" to sharedDir(ctx).absolutePath,
         )
         val pb = ProcessBuilder(argv)
         pb.directory(home(ctx))

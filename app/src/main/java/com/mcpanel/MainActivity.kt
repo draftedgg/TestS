@@ -32,7 +32,7 @@ import org.json.JSONObject
 import java.io.File
 
 class MainActivity : Activity() {
-    private val shared get() = File(Environment.getExternalStorageDirectory(), "MCPanel")
+    private val shared get() = Embed.sharedDir(this)
     private val stateFile get() = File(shared, "state.json")
     private val consoleLog get() = File(shared, "console.log")
     private val installLog get() = File(shared, "install.log")
@@ -119,6 +119,26 @@ class MainActivity : Activity() {
 
     private fun hasError(st: JSONObject?): Boolean = sval(st, "last_error").isNotEmpty()
 
+    /** Script sets this marker when bootstrap finishes successfully. */
+    private fun bootstrapDone(): Boolean = File(Embed.prefix(this), "tmp/bootstrap-done").exists()
+
+    /** Clear last_error before launching a new command (stale errors must not block). */
+    private fun clearError() {
+        val cur = readState() ?: return
+        if (!hasError(cur)) return
+        try {
+            cur.put("last_error", JSONObject.NULL)
+            stateFile.parentFile?.mkdirs()
+            val tmp = File(stateFile.parentFile, ".state.app.tmp")
+            tmp.writeText(cur.toString())
+            tmp.renameTo(stateFile)
+        } catch (_: Exception) {}
+    }
+
+    /** Re-render config when the user comes back from the permission settings. */
+    private var resumer: (() -> Unit)? = null
+    override fun onResume() { super.onResume(); resumer?.invoke() }
+
     /** Run mc_manager.sh subcommand inside the embedded prefix. */
     private fun runTermux(vararg args: String) {
         if (!Embed.isBootstrapped(this)) { toast("Entorno no preparado."); return }
@@ -172,7 +192,7 @@ class MainActivity : Activity() {
         val envOk = Embed.isBootstrapped(this)
         val storageOk = hasStorage()
         val st = readState()
-        val pkgsOk = sval(st, "last_action") == "bootstrap" && !hasError(st)
+        val pkgsOk = bootstrapDone()
         val allOk = envOk && storageOk && pkgsOk
         val stInstalled = st?.optBoolean("installed") ?: false
         fun dot(ok: Boolean) = if (ok) "●" else "○"
@@ -194,8 +214,9 @@ class MainActivity : Activity() {
                 }
             } else View(this),
             row(dot(pkgsOk) + "  Herramientas (jq, tmux, java…)", if (pkgsOk) "LISTO" else "PENDIENTE", dotColor(pkgsOk)),
-            if (!pkgsOk) button("INSTALAR HERRAMIENTAS", primary = true) {
-                runTermux("bootstrap"); showBootstrapLog()
+            if (!pkgsOk) button("INSTALAR HERRAMIENTAS", primary = storageOk) {
+                if (!storageOk) { toast("Primero concede el permiso de archivos (paso 2).") }
+                else { clearError(); runTermux("bootstrap"); showBootstrapLog() }
             } else View(this),
             button("VER REGISTRO") { showBootstrapLog() },
             View(this),
@@ -205,21 +226,44 @@ class MainActivity : Activity() {
             },
         )
         setContentView(v)
+        resumer = { showConfig() }
         // auto-refresh while bootstrap runs
         if (!pkgsOk) scope.launch {
             while (isActive) {
                 delay(2000)
-                val s2 = readState()
-                val done = s2?.optString("last_action") == "bootstrap" && !hasError(s2)
-                if (done) { showConfig(); break }
+                if (bootstrapDone()) { showConfig(); break }
             }
         }
     }
 
     private fun showBootstrapLog() {
+        resumer = null
         val out = mono("")
-        val v = screen(header("REGISTRO DE INSTALACIÓN"), out, button("VOLVER") { showConfig() })
-        setContentView(v); watch(installLog, out)
+        val v = screen(
+            header("REGISTRO DE INSTALACIÓN"),
+            mono("Entorno: ${if (Embed.isBootstrapped(this)) "LISTO" else "FALTA"} · Permiso: ${if (hasStorage()) "LISTO" else "FALTA"}", MUTED, 12),
+            out,
+            button("REINTENTAR BOOTSTRAP") { clearError(); runTermux("bootstrap") },
+            button("VOLVER") { showConfig() },
+        )
+        setContentView(v)
+        // combined tail: last_run.log (captura de la app) + install.log (script)
+        pollJob?.cancel()
+        pollJob = scope.launch {
+            while (isActive) {
+                val s = withContext(Dispatchers.IO) {
+                    val run = Embed.lastRunLog(this@MainActivity)
+                    val a = if (run.exists()) run.readText().takeLast(8000) else ""
+                    val b = if (installLog.exists()) installLog.readText().takeLast(6000) else ""
+                    listOf(a, b).filter { it.isNotBlank() }.joinToString("\n───\n")
+                }
+                val shown = if (s.isBlank())
+                    "(sin salida todavía — espera unos segundos; si persiste, falta el permiso del paso 2)"
+                else s
+                if (out.text.toString() != shown) out.text = shown
+                delay(1000)
+            }
+        }
     }
 
     // ══════════════ SCREEN 2: CREAR SERVIDOR ══════════════

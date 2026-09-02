@@ -6,12 +6,12 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.os.Environment
 import android.os.IBinder
 import android.os.PowerManager
+import java.io.File
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import java.io.File
+
 
 /**
  * Foreground download service: partial wakelock only during download,
@@ -41,7 +41,7 @@ class DownloadService : Service() {
         startForeground(NOTIF_ID, buildNotification(name, -1))
         thread?.interrupt()
         thread = Thread {
-            val inbox = File(Environment.getExternalStorageDirectory(), "MCPanel/inbox")
+            val inbox = File(Embed.sharedDir(this), "inbox")
             val dest = File(inbox, name)
             val ok = Apis.downloadToFile(url, dest)
             if (ok && afterCmd != null) {

@@ -119,8 +119,20 @@ refresh_running_state() {
 cmd_bootstrap() {
     log "INF" "bootstrap: start"
     write_state '.last_action = "bootstrap"'
-    command -v jq >/dev/null 2>&1 || pkg install -y jq >> "$INSTALL_LOG" 2>&1
+    # jq first: every later step depends on it
+    if ! command -v jq >/dev/null 2>&1; then
+        pkg install -y jq >> "$INSTALL_LOG" 2>&1
+    fi
     pkg install -y wget curl tmux jq unzip procps findutils diffutils termux-tools >> "$INSTALL_LOG" 2>&1
+    # verify base tools; report exactly which one is missing
+    local MISSING=""
+    for tool in jq wget curl tmux unzip pgrep find diff bash; do
+        command -v "$tool" >/dev/null 2>&1 || MISSING="$MISSING $tool"
+    done
+    if [ -n "$MISSING" ]; then
+        state_set_error "bootstrap: faltan herramientas:$MISSING (ver instala.log)"
+        exit 1
+    fi
     log "OK"  "bootstrap: base packages"
     # In the embedded (non-Termux) prefix there is no wake-lock binary;
     # the app's ServerService holds a partial wakelock while commands run.
@@ -128,10 +140,12 @@ cmd_bootstrap() {
     if ! command -v playit >/dev/null 2>&1 && ! command -v playitd >/dev/null 2>&1; then
         pkg install -y tur-repo >> "$INSTALL_LOG" 2>&1
         pkg update -y >> "$INSTALL_LOG" 2>&1
-        pkg install -y playit >> "$INSTALL_LOG" 2>&1
+        pkg install -y playit >> "$INSTALL_LOG" 2>&1 || log "WRN" "bootstrap: playit no disponible (no es fatal)"
     fi
     command -v playit  >/dev/null 2>&1 && PLAYIT_BIN="playit"
     command -v playitd >/dev/null 2>&1 && PLAYIT_BIN="playitd"
+    mkdir -p "${PREFIX%/usr}/tmp"
+    : > "${PREFIX%/usr}/tmp/bootstrap-done"
     log "OK"  "bootstrap: done"
     write_state ".last_action = \"bootstrap\" .last_error = null"
 }

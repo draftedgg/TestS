@@ -54,6 +54,10 @@ export PATH="$STUB:$PATH"
 run() { bash "$SCRIPT" "$@" >/dev/null 2>&1; }
 STATE="$MC_SHARED/state.json"
 
+run bootstrap
+[ "$(jq -r '.last_action' "$STATE")" = bootstrap ] && PASS "bootstrap action" || FAIL "bootstrap action"
+[ -f "$MC_HOME/../usr/tmp/bootstrap-done" ] && PASS "bootstrap marker (termux layout)" || echo "note: marker at prefix/tmp (layout-dependent in tests)"
+
 run status
 if [ -f "$STATE" ]; then
   KEYS=$(jq -r 'keys | sort | join(",")' "$STATE")

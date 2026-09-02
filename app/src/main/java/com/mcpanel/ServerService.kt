@@ -9,10 +9,13 @@ import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import java.io.File
 
 /**
  * Foreground service running mc_manager.sh inside the embedded prefix.
- * Holds a partial wakelock for the duration of each command.
+ * Holds a partial wakelock for the duration of each command and captures
+ * the full output (stdout+stderr+exit code) into MCPanel/last_run.log so
+ * the VER REGISTRO screen always shows what happened.
  */
 class ServerService : Service() {
     private val locks = mutableListOf<Pair<Thread, PowerManager.WakeLock>>()
@@ -33,9 +36,25 @@ class ServerService : Service() {
         val wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MCPanel:cmd")
         val t = Thread {
             wake.acquire(60 * 60 * 1000L)
+            val lines = mutableListOf<String>()
+            var rc = -1
             try {
-                Embed.runManager(this, cmd, args)
+                rc = Embed.runManager(this, cmd, args) { line ->
+                    synchronized(lines) {
+                        lines.add(line)
+                        if (lines.size > 400) lines.removeAt(0)
+                    }
+                }
             } finally {
+                try {
+                    val log = Embed.lastRunLog(this)
+                    log.parentFile?.mkdirs()
+                    val head = "── " + java.util.Date().toString() + "  mc_manager " + cmd +
+                            (if (args.isNotEmpty()) " " + args.joinToString(" ") else "") +
+                            "  →  exit " + rc + "\n"
+                    val body = synchronized(lines) { lines.joinToString("\n") }
+                    log.appendText(head + body + "\n\n")
+                } catch (_: Exception) {}
                 try { wake.release() } catch (_: Exception) {}
                 synchronized(locks) { locks.removeAll { it.first === Thread.currentThread() } }
             }
