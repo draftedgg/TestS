@@ -39,7 +39,7 @@ class BootstrapActivity : Activity() {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BLACK); setPadding(48, 96, 48, 32) }
         fun tv(t: String, size: Int, c: Int): TextView = TextView(this).apply { text = t; textSize = size.toFloat(); setTextColor(c); setPadding(0, 8, 0, 8) }
         col.addView(tv("PREPARANDO ENTORNO", 11, FG))
-        col.addView(tv("Se descargará el entorno base de Termux (~33 MB) una única vez. Queda dentro de MCPanel; no se necesita la app de Termux.", 14, FG))
+        col.addView(tv("El entorno base de Termux viene incluido en la app. Se extrae una única vez (~90 MB en disco). No se necesita conexión.", 14, FG))
         status = tv("", 13, MUTED); col.addView(status)
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true }
         col.addView(bar)
@@ -56,23 +56,19 @@ class BootstrapActivity : Activity() {
     private fun install() {
         retry.visibility = android.view.View.GONE
         bar.isIndeterminate = true
-        status.text = "Descargando bootstrap…"
+        status.text = "Extrayendo entorno…"
         status.setTextColor(MUTED)
         scope.launch {
             val ok = withContext(Dispatchers.IO) {
                 try {
-                    val cache = File(cacheDir, "bootstrap.zip")
-                    val dl = Apis.downloadToFile(Embed.BOOTSTRAP_URL, cache)
-                    if (!dl) return@withContext false
-                    status.post { status.text = "Extrayendo…" }
-                    val r = Embed.installBootstrap(this@BootstrapActivity, cache.inputStream()) { }
-                    cache.delete()
-                    r
+                    assets.open(Embed.BOOTSTRAP_ASSET).use { input ->
+                        Embed.installBootstrap(this@BootstrapActivity, input) { }
+                    }
                 } catch (_: Exception) { false }
             }
             if (ok) { toast("Entorno listo."); goMain() }
             else {
-                status.text = "Error descargando el entorno. Verifica tu conexión."
+                status.text = "Error extrayendo el entorno. Reintenta."
                 status.setTextColor(ERROR)
                 retry.visibility = android.view.View.VISIBLE
             }

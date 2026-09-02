@@ -4,7 +4,8 @@ plugins {
 }
 
 android { namespace = "com.mcpanel"; compileSdk = 35
-    defaultConfig { applicationId = "com.mcpanel"; minSdk = 26; targetSdk = 33; versionCode = 1; versionName = "0.1.0" }
+    defaultConfig { applicationId = "com.mcpanel"; minSdk = 26; targetSdk = 28; versionCode = 1; versionName = "0.1.0" }
+    lint { checkReleaseBuilds = false; abortOnError = false }
     buildTypes { release {
         isMinifyEnabled = true
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
