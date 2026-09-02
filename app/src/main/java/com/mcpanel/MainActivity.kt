@@ -58,6 +58,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!Embed.isBootstrapped(this)) { startActivity(Intent(this, BootstrapActivity::class.java)); finish(); return }
         val st = readState()
         if (st != null && st.optBoolean("installed")) showServer() else showConfig()
     }
@@ -114,15 +115,11 @@ class MainActivity : Activity() {
     // ── state / intents ──────────────────────────────────────────────
     private fun readState(): JSONObject? = try { JSONObject(stateFile.readText()) } catch (_: Exception) { null }
 
+    /** Run mc_manager.sh inside the embedded prefix via the foreground service. */
     private fun runTermux(vararg args: String) {
-        val i = Intent("com.termux.RUN_COMMAND").apply {
-            setClassName("com.termux", "com.termux.app.RunCommandService")
-            putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/home/mcpanel/mc_manager.sh")
-            putExtra("com.termux.RUN_COMMAND_ARGUMENTS", args)
-            putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-            putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
-        }
-        try { startService(i) } catch (_: Exception) { toast("Termux no está preparado.") }
+        if (!Embed.isBootstrapped(this)) { toast("Entorno no preparado. Abre de nuevo."); return }
+        val i = Intent(this, ServerService::class.java).putExtra(ServerService.EXTRA_CMD, args.joinToString(" "))
+        ContextCompat.startForegroundService(this, i)
     }
 
     private fun download(url: String, name: String) {
@@ -160,10 +157,9 @@ class MainActivity : Activity() {
     // ══════════════ SCREEN 1: CONFIGURACIÓN ══════════════
     private fun showConfig() {
         pollJob?.cancel()
-        val termuxInstalled = try { packageManager.getPackageInfo("com.termux", 0); true } catch (_: Exception) { false }
+        val termuxInstalled = Embed.isBootstrapped(this) // embedded env replaces Termux app
         val hasStorage = hasStorage()
-        val scriptInstalled = File(Environment.getExternalStorageDirectory(), "Android/data/com.termux/files/home/mcpanel/mc_manager.sh").exists() ||
-                (readState()?.optString("last_action", "").let { it == "bootstrap" || it == "install" })
+        val scriptInstalled = File(Embed.home(this), "mcpanel/mc_manager.sh").exists()
 
         val allowCmd = "echo allow-external-apps=true >> ~/.termux/termux.properties"
 
@@ -172,8 +168,8 @@ class MainActivity : Activity() {
 
         val v = screen(
             header("CONFIGURACIÓN"),
-            row(dot(termuxInstalled) + " Termux instalado", if (termuxInstalled) "OK" else "FALTA", dotColor(termuxInstalled)),
-            mono("Instálalo desde F-Droid o GitHub. Nunca Play Store.", MUTED, 12),
+            row(dot(termuxInstalled) + " Entorno base", if (termuxInstalled) "OK" else "FALTA", dotColor(termuxInstalled)),
+            mono("Entorno Linux embebido (bootstrap Termux). Sin app separada.", MUTED, 12),
             separator(),
             row(dot(hasStorage) + " Permiso de todos los archivos", if (hasStorage) "OK" else "PENDIENTE", dotColor(hasStorage)),
             if (!hasStorage) button("CONCEDER PERMISO") {
