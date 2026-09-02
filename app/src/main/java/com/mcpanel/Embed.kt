@@ -8,14 +8,11 @@ import java.util.zip.ZipInputStream
  * Embedded Linux environment (Termux bootstrap, GPLv3) inside the app's
  * private storage. No separate Termux app, no intents.
  *
- * Layout (same conventions as Termux):
  *   PREFIX = /data/data/com.mcpanel/files/usr
  *   HOME   = /data/data/com.mcpanel/files/home
  *
- * Bootstrap zip ships inside the APK at assets/bootstrap/. Its root IS the
- * prefix (bin/, lib/, etc/ at top level) — extracted into files/usr.
- * SYMLINKS.txt lines look like: <abs target>←<./link-path> and targets
- * referencing com.termux are rewritten to this app's prefix.
+ * Bootstrap zip ships in assets/bootstrap/. Its root IS the prefix
+ * (bin/, lib/, etc/ at top level) — extracted into files/usr.
  */
 object Embed {
     const val BOOTSTRAP_ASSET = "bootstrap/bootstrap-aarch64.zip"
@@ -23,6 +20,7 @@ object Embed {
     fun filesDir(ctx: Context): File = ctx.getFilesDir()
     fun prefix(ctx: Context): File = File(filesDir(ctx), "usr")
     fun home(ctx: Context): File = File(filesDir(ctx), "home")
+    fun script(ctx: Context): File = File(home(ctx), "mcpanel/mc_manager.sh")
 
     fun isBootstrapped(ctx: Context): Boolean =
         File(prefix(ctx), "bin/bash").exists() && File(prefix(ctx), "bin/apt").exists()
@@ -55,6 +53,7 @@ object Embed {
             if (!File(root, "bin/bash").exists()) return false
             writeProfile(ctx)
             File(root, "tmp").mkdirs()
+            installScript(ctx)
             return true
         } catch (_: Exception) { return false }
     }
@@ -100,42 +99,53 @@ object Embed {
         }
     }
 
-    /** Run a command inside the embedded prefix. Blocks; returns exit code. */
-    fun exec(ctx: Context, command: String, args: List<String>, onLine: ((String) -> Unit)? = null): Int {
+    /** Copy mc_manager.sh from res/raw into HOME/mcpanel/ (idempotent, on every boot). */
+    fun installScript(ctx: Context) {
+        val target = script(ctx)
+        target.parentFile?.mkdirs()
+        ctx.resources.openRawResource(R.raw.mc_manager).use { input ->
+            target.outputStream().use { input.copyTo(it) }
+        }
+        target.setExecutable(true, false)
+        File(prefix(ctx), "tmp").mkdirs()
+    }
+
+    /**
+     * Run the manager script with an argv array (no -c quoting pitfalls):
+     *   <prefix>/bin/bash <script> <subcommand> [args...]
+     * Blocks; returns exit code; streams output lines if requested.
+     */
+    fun runManager(ctx: Context, subcommand: String, args: List<String> = emptyList(), onLine: ((String) -> Unit)? = null): Int {
+        installScript(ctx)
         val bash = File(prefix(ctx), "bin/bash")
         if (!bash.exists()) return -1
-        val bootCp = System.getProperty("java.boot.classpath") ?: ""
-        val env = listOf(
-            "PATH=" + prefix(ctx).absolutePath + "/bin",
-            "HOME=" + home(ctx).absolutePath,
-            "TMPDIR=" + prefix(ctx).absolutePath + "/tmp",
-            "PREFIX=" + prefix(ctx).absolutePath,
-            "TERM=xterm-256color",
-            "LD_PRELOAD=" + prefix(ctx).absolutePath + "/lib/libtermux-exec.so",
-            "ANDROID_DATA=/data",
-            "ANDROID_ROOT=/system",
-            "BOOTCLASSPATH=" + bootCp,
-            "LANG=en_US.UTF-8",
+        val argv = mutableListOf(
+            bash.absolutePath,
+            script(ctx).absolutePath,
+            subcommand
+        ) + args
+        val env = mapOf(
+            "PATH" to (prefix(ctx).absolutePath + "/bin"),
+            "HOME" to home(ctx).absolutePath,
+            "TMPDIR" to (prefix(ctx).absolutePath + "/tmp"),
+            "PREFIX" to prefix(ctx).absolutePath,
+            "TERM" to "xterm-256color",
+            "LD_PRELOAD" to (prefix(ctx).absolutePath + "/lib/libtermux-exec.so"),
+            "ANDROID_DATA" to "/data",
+            "ANDROID_ROOT" to "/system",
+            "LANG" to "en_US.UTF-8",
+            "MC_SHARED" to (android.os.Environment.getExternalStorageDirectory().absolutePath + "/MCPanel"),
         )
-        val pb = ProcessBuilder(listOf(bash.absolutePath, "-c", command) + args)
+        val pb = ProcessBuilder(argv)
         pb.directory(home(ctx))
         val pe = pb.environment()
         pe.clear()
-        env.forEach { kv -> val i2 = kv.indexOf('='); if (i2 > 0) pe[kv.substring(0, i2)] = kv.substring(i2 + 1) }
+        pe.putAll(env)
         pb.redirectErrorStream(true)
         val p = try { pb.start() } catch (_: Exception) { return -1 }
         if (onLine != null) {
             p.inputStream.bufferedReader().forEachLine { onLine(it) }
         }
         return try { p.waitFor() } catch (_: InterruptedException) { -1 }
-    }
-
-    /** Install a bundled raw script to the embedded HOME. */
-    fun installScript(ctx: Context, resId: Int, target: File) {
-        target.parentFile?.mkdirs()
-        ctx.resources.openRawResource(resId).use { input ->
-            target.outputStream().use { input.copyTo(it) }
-        }
-        target.setExecutable(true, false)
     }
 }

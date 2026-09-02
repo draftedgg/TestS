@@ -115,10 +115,12 @@ class MainActivity : Activity() {
     // ── state / intents ──────────────────────────────────────────────
     private fun readState(): JSONObject? = try { JSONObject(stateFile.readText()) } catch (_: Exception) { null }
 
-    /** Run mc_manager.sh inside the embedded prefix via the foreground service. */
+    /** Run mc_manager.sh subcommand inside the embedded prefix. */
     private fun runTermux(vararg args: String) {
         if (!Embed.isBootstrapped(this)) { toast("Entorno no preparado. Abre de nuevo."); return }
-        val i = Intent(this, ServerService::class.java).putExtra(ServerService.EXTRA_CMD, args.joinToString(" "))
+        val i = Intent(this, ServerService::class.java)
+            .putExtra(ServerService.EXTRA_CMD, args.first())
+            .putExtra(ServerService.EXTRA_ARGS, args.drop(1).toTypedArray())
         ContextCompat.startForegroundService(this, i)
     }
 
@@ -157,21 +159,19 @@ class MainActivity : Activity() {
     // ══════════════ SCREEN 1: CONFIGURACIÓN ══════════════
     private fun showConfig() {
         pollJob?.cancel()
-        val termuxInstalled = Embed.isBootstrapped(this) // embedded env replaces Termux app
+        val envOk = Embed.isBootstrapped(this)
         val hasStorage = hasStorage()
-        val scriptInstalled = File(Embed.home(this), "mcpanel/mc_manager.sh").exists()
-
-        val allowCmd = "echo allow-external-apps=true >> ~/.termux/termux.properties"
-
+        val st = readState()
+        val pkgsOk = st?.optString("last_action") == "bootstrap" && st.optString("last_error").isEmpty()
+        val allOk = envOk && hasStorage && pkgsOk
         fun dot(ok: Boolean) = if (ok) "●" else "○"
         fun dotColor(ok: Boolean) = if (ok) ACCENT else WARN
 
         val v = screen(
             header("CONFIGURACIÓN"),
-            row(dot(termuxInstalled) + " Entorno base", if (termuxInstalled) "OK" else "FALTA", dotColor(termuxInstalled)),
-            mono("Entorno Linux embebido (bootstrap Termux). Sin app separada.", MUTED, 12),
-            separator(),
-            row(dot(hasStorage) + " Permiso de todos los archivos", if (hasStorage) "OK" else "PENDIENTE", dotColor(hasStorage)),
+            row(dot(envOk) + " 1. Entorno Linux embebido", if (envOk) "LISTO" else "FALTA", dotColor(envOk)),
+            mono("Incluido en la app. Se extrajo al instalar.", MUTED, 12),
+            row(dot(hasStorage) + " 2. Permiso de archivos", if (hasStorage) "LISTO" else "PENDIENTE", dotColor(hasStorage)),
             if (!hasStorage) button("CONCEDER PERMISO") {
                 if (android.os.Build.VERSION.SDK_INT >= 30) {
                     try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
@@ -182,26 +182,30 @@ class MainActivity : Activity() {
                         android.Manifest.permission.READ_EXTERNAL_STORAGE), 1)
                 }
             } else View(this),
-            separator(),
-            header("ALLOW-EXTERNAL-APPS"),
-            mono("Ejecuta en Termux:", MUTED, 12),
-            mono(allowCmd),
-            button("COPIAR COMANDO") { copy(allowCmd) },
-            row(dot(scriptInstalled) + " Bootstrap ejecutado", if (scriptInstalled) "OK" else "PENDIENTE", dotColor(scriptInstalled)),
-            button("EJECUTAR BOOTSTRAP", primary = true) {
-                runTermux("bootstrap")
-                scope.launch { delay(2500); showBootstrapLog() }
-            },
+            row(dot(pkgsOk) + " 3. Herramientas (jq, tmux…)", if (pkgsOk) "LISTO" else "PENDIENTE", dotColor(pkgsOk)),
+            if (!pkgsOk) button("INSTALAR HERRAMIENTAS", primary = true) {
+                runTermux("bootstrap"); showBootstrapLog()
+            } else View(this),
             button("VER REGISTRO") { showBootstrapLog() },
             View(this),
-            button("CONTINUAR") { showCreate() },
+            button("CONTINUAR →", primary = allOk) { showCreate() },
         )
         setContentView(v)
+        // auto-refresh when bootstrap finishes writing state
+        if (!pkgsOk) scope.launch {
+            while (java.lang.Boolean.TRUE) {
+                delay(2000)
+                val s2 = readState()
+                val done = s2?.optString("last_action") == "bootstrap" && s2.optString("last_error").isEmpty()
+                if (done) { showConfig(); break }
+                if (!isActive) break
+            }
+        }
     }
 
     private fun showBootstrapLog() {
         val out = mono("")
-        val v = screen(header("BOOTSTRAP — INSTALL.LOG"), out, button("ATRÁS") { showConfig() })
+        val v = screen(header("REGISTRO DE INSTALACIÓN"), out, button("VOLVER") { showConfig() })
         setContentView(v); watch(installLog, out)
     }
 
@@ -348,8 +352,18 @@ class MainActivity : Activity() {
 
     private fun showInstallProgress() {
         val out = mono("")
-        val v = screen(header("INSTALANDO — INSTALL.LOG"), out, button("IR AL SERVIDOR") { showServer() })
+        val v = screen(header("INSTALANDO SERVIDOR"), out, button("IR AL SERVIDOR") { showServer() })
         setContentView(v); watch(installLog, out)
+        // auto-jump to server screen when install completes
+        scope.launch {
+            while (isActive) {
+                delay(2000)
+                val s = readState()
+                if (s?.optBoolean("installed") == true) { showServer(); break }
+                if (s?.optString("last_error", "").isNotEmpty() && s?.optString("last_error") != "null") break
+                if (!isActive) break
+            }
+        }
     }
 
     // ══════════════ SCREEN 3: SERVIDOR ══════════════

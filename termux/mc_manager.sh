@@ -117,7 +117,7 @@ cmd_bootstrap() {
     log "INF" "bootstrap: start"
     write_state '.last_action = "bootstrap"'
     command -v jq >/dev/null 2>&1 || pkg install -y jq >> "$INSTALL_LOG" 2>&1
-    pkg install -y wget curl tmux jq unzip >> "$INSTALL_LOG" 2>&1
+    pkg install -y wget curl tmux jq unzip termux-tools >> "$INSTALL_LOG" 2>&1
     log "OK"  "bootstrap: base packages"
     # In the embedded (non-Termux) prefix there is no wake-lock binary;
     # the app's ServerService holds a partial wakelock while commands run.
