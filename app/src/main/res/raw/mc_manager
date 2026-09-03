@@ -374,22 +374,31 @@ cmd_install() {
             LOADER_VER=$(curl -s https://meta.fabricmc.net/v2/versions/loader | jq -r '(map(select(.stable==true)) | .[0].version) // .[0].version' 2>/dev/null)
             [ -z "$INSTALLER_URL" ] || [ -z "$LOADER_VER" ] && { state_set_error "install: fabric meta failed"; exit 1; }
             wget -q "$INSTALLER_URL" -O "$SERVER_DIR/fabric-installer.jar" || { state_set_error "install: fabric installer download failed"; exit 1; }
-            local intento VANILLA_OK=0 VANILLA_JAR=""
+            # NOTE on layout: the current fabric-installer downloads the VANILLA
+            # game jar to <dir>/server.jar (verified against upstream source);
+            # old installers put it in libraries/server-*-*.jar. The launch jar
+            # needs the vanilla jar intact, so server.jar must NEVER be
+            # overwritten with fabric-server-launch.jar.
+            local intento FABRIC_OK=0 LEGACY_JAR=""
             for intento in 1 2 3; do
                 log "INF" "install: fabric installer attempt $intento/3"
                 java -jar "$SERVER_DIR/fabric-installer.jar" server \
                     -mcversion "$VERSION" -loader "$LOADER_VER" -downloadMinecraft -dir "$SERVER_DIR" >> "$INSTALL_LOG" 2>&1
-                VANILLA_JAR=$(find "$SERVER_DIR/libraries" -name "server-*-*.jar" 2>/dev/null | head -1)
-                [ -z "$VANILLA_JAR" ] && VANILLA_JAR=$(find "$SERVER_DIR/libraries" -name "minecraft-server-*.jar" 2>/dev/null | head -1)
-                if [ -f "$SERVER_DIR/fabric-server-launch.jar" ] && [ -n "$VANILLA_JAR" ] && [ -s "$VANILLA_JAR" ]; then
-                    VANILLA_OK=1; break
+                if [ -s "$SERVER_DIR/fabric-server-launch.jar" ] && [ -s "$SERVER_DIR/server.jar" ]; then
+                    FABRIC_OK=1; break
+                fi
+                LEGACY_JAR=$(find "$SERVER_DIR/libraries" \( -name "server-*-*.jar" -o -name "minecraft-server-*.jar" \) 2>/dev/null | head -1)
+                if [ -s "$SERVER_DIR/fabric-server-launch.jar" ] && [ -n "$LEGACY_JAR" ] && [ -s "$LEGACY_JAR" ]; then
+                    ln -sf fabric-server-launch.jar "$SERVER_DIR/server.jar" 2>/dev/null \
+                      || cp "$SERVER_DIR/fabric-server-launch.jar" "$SERVER_DIR/server.jar"
+                    FABRIC_OK=1; break
                 fi
                 rm -rf "$SERVER_DIR/libraries" "$SERVER_DIR/versions" 2>/dev/null
                 sleep 2
             done
-            [ "$VANILLA_OK" -ne 1 ] && { state_set_error "install: fabric vanilla download failed after 3 attempts"; exit 1; }
-            cp "$SERVER_DIR/fabric-server-launch.jar" "$SERVER_DIR/server.jar"
+            [ "$FABRIC_OK" -ne 1 ] && { state_set_error "install: fabric vanilla download failed after 3 attempts"; exit 1; }
             rm -f "$SERVER_DIR/fabric-installer.jar"
+            log "OK" "install: fabric ready (launch jar + vanilla jar)"
             ;;
         forge|neoforge)
             local INSTALLER_JAR=""
@@ -477,11 +486,15 @@ cmd_start() {
     command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1 || true
 
     cd "$SERVER_DIR" || { state_set_error "start: cannot cd $SERVER_DIR"; exit 1; }
-    local RUN_CMD
+    local RUN_CMD JVM_FLAGS="-Xms$RAM_MIN -Xmx$RAM_MAX -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200"
     if [ -f "run.sh" ]; then
-        RUN_CMD="bash run.sh >> '$CONSOLE_LOG' 2>&1"
+        # Forge/NeoForge: honor RAM via user_jvm_args.txt (run.sh reads it)
+        echo "$JVM_FLAGS" > user_jvm_args.txt 2>/dev/null || true
+        RUN_CMD="bash run.sh nogui >> '$CONSOLE_LOG' 2>&1"
+    elif [ "${LOADER:-}" = "fabric" ] && [ -f "fabric-server-launch.jar" ]; then
+        RUN_CMD="java $JVM_FLAGS -jar fabric-server-launch.jar nogui >> '$CONSOLE_LOG' 2>&1"
     else
-        RUN_CMD="java -Xms$RAM_MIN -Xmx$RAM_MAX -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -jar server.jar nogui >> '$CONSOLE_LOG' 2>&1"
+        RUN_CMD="java $JVM_FLAGS -jar server.jar nogui >> '$CONSOLE_LOG' 2>&1"
     fi
     tmux new-session -d -s "$TMUX_SESSION" "$RUN_CMD" || { state_set_error "start: tmux failed"; exit 1; }
     sleep 1
@@ -508,8 +521,8 @@ cmd_stop() {
         fi
     fi
     # never leave java orphaned, but only after graceful attempt
-    if pgrep -f "java.*mcserver\|java.*server.jar" >/dev/null 2>&1; then
-        pkill -f "java.*mcserver\|java.*server.jar" 2>/dev/null
+    if pgrep -f "java.*(fabric-server-launch|/server\.jar| mcserver)" >/dev/null 2>&1; then
+        pkill -f "java.*(fabric-server-launch|/server\.jar| mcserver)" 2>/dev/null
         sleep 1
     fi
     command -v termux-wake-unlock >/dev/null 2>&1 && termux-wake-unlock >/dev/null 2>&1 || true
