@@ -59,42 +59,111 @@ ensure_embedded_env() {
              "$PREFIX/var/log/apt" "$PREFIX/var/cache/apt/archives/partial" \
              "$PREFIX/var/lib/dpkg/updates" "$PREFIX/var/lib/dpkg/info" \
              "$PREFIX/var/lib/dpkg/triggers" "$PREFIX/var/lib/apt/lists/partial" \
-             "${PREFIX%/usr}/tmp"; do
+             "${PREFIX%/usr}/tmp" "$PREFIX/var/lib" "$PREFIX/bin"; do
         mkdir -p "$d" 2>/dev/null
     done
-    # dpkg wrapper: apt execs $PREFIX/bin/dpkg for every unpack; the shim
-    # rewrites com.termux → io.mcpanel inside each .deb first (Termux debs
-    # embed those paths in data.tar member names — dpkg would otherwise try
-    # to create /data/data/com.termux at the real root and fail).
-    mkdir -p "$PREFIX/bin" "$PREFIX/etc/apt/apt.conf.d" 2>/dev/null
-    # The dpkg shim below is the single interception point for .deb path
-    # patching. A Pre-Install-Pkgs hook proved redundant AND fragile: apt
-    # runs every item in the block as its own script (a stray "2" item made
-    # apt fail with "script 2 not found"). Remove any stale conf.
+    # The dpkg shim is the single interception point for .deb path patching.
+    # Remove any stale Pre-Install-Pkgs conf from very old versions.
     rm -f "$PREFIX/etc/apt/apt.conf.d/99mcpanel" 2>/dev/null
     local DPKG_REAL="$PREFIX/bin/dpkg.real"
+    local SHIM_VER="$PREFIX/var/lib/mc-shim-version"
+    local SHIM_WANT=3
+    # 1) deb patcher: rewrite whenever its version marker is stale — covers
+    #    devices that already extracted an older (buggy) version.
+    if [ "$(cat "$SHIM_VER" 2>/dev/null)" != "$SHIM_WANT" ] || [ ! -x "$DEB_PATCH_BIN" ]; then
+        cat > "$DEB_PATCH_BIN" <<'HOOK'
+#!/data/data/io.mcpanel/files/usr/bin/bash
+# Rewrites com.termux -> io.mcpanel inside .debs before dpkg unpacks them.
+# Reads deb paths on stdin (called once per deb by the dpkg shim).
+# Both strings are exactly 10 chars: same-length byte replacement keeps
+# ELF offsets and tar offsets intact.
+PREFIX="${PREFIX:-/data/data/io.mcpanel/files/usr}"
+PATCHED_DIR="$PREFIX/var/cache/apt/mc-patched"
+PATCH_LOG="$PREFIX/var/log/mc-deb-patch.log"
+log_p() { echo "[patch $(date '+%H:%M:%S')] $*" >> "$PATCH_LOG" 2>/dev/null; }
+mkdir -p "$PATCHED_DIR" "$PREFIX/var/log" 2>/dev/null
+rm -rf "$PATCHED_DIR"/.work.* 2>/dev/null
+WORK="$PATCHED_DIR/.work.$$"
+while IFS= read -r DEB; do
+    case "$DEB" in *.deb) ;; *) continue ;; esac
+    [ -f "$DEB" ] || continue
+    log_p "processing $(basename "$DEB") ($(wc -c < "$DEB") bytes)"
+    if [ -f "$DEB.patched" ] && [ -s "$DEB.patched" ]; then
+        mv -f "$DEB.patched" "$DEB" 2>/dev/null
+        echo "$DEB"; continue
+    fi
+    rm -rf "$WORK"; mkdir -p "$WORK"
+    if ! dpkg-deb -R "$DEB" "$WORK" >>"$PATCH_LOG" 2>&1; then
+        log_p "dpkg-deb -R failed on $(basename "$DEB") - intentando con tar"
+        rm -rf "$WORK"; mkdir -p "$WORK"
+        if ! dpkg-deb --fsys-tarfile "$DEB" 2>>"$PATCH_LOG" | tar -xf - -C "$WORK" 2>>"$PATCH_LOG"; then
+            log_p "EXTRACT FAILED for $DEB (espacio en /data?) - entregando SIN patchear"
+            echo "$DEB"; continue
+        fi
+    fi
+    # 1) the tree inside the deb is ./data/data/com.termux - rename it
+    if [ -d "$WORK/data/data/com.termux" ]; then
+        mv "$WORK/data/data/com.termux" "$WORK/data/data/io.mcpanel" 2>/dev/null
+    fi
+    # 2) rewrite path strings inside every packaged file (same-length ->
+    #    ELF offsets intact)
+    find "$WORK" -type f -size -8M -print0 2>/dev/null |         xargs -0 -r grep -l -a -F 'com.termux' 2>/dev/null |     while IFS= read -r f; do
+        sed -i 's/com\.termux/io.mcpanel/g' "$f" 2>/dev/null || true
+    done
+    # 2b) Termux's dpkg refuses to repack debs whose maintainer scripts are
+    #     644 ("bad permissions") - killed whole transactions (tur-repo).
+    find "$WORK/DEBIAN" -type f -print0 2>/dev/null |         xargs -0 -r chmod 755 2>/dev/null
+    # 2c) symlinks with absolute com.termux targets (openjdk ships several)
+    find "$WORK" -type l -print0 2>/dev/null |     while IFS= read -r -d '' l; do
+        t=$(readlink "$l") || continue
+        case "$t" in *com.termux*)
+            rm -f "$l"
+            ln -s "${t//com.termux/io.mcpanel}" "$l" 2>/dev/null
+        ;; esac
+    done
+    [ -d "$WORK/data/data/io.mcpanel/usr/bin" ] && chmod 755 "$WORK/data/data/io.mcpanel/usr/bin"/* 2>/dev/null
+    # 3) repack to a sibling file; replace original ONLY on success.
+    if dpkg-deb -b "$WORK" "$DEB.patched" >>"$PATCH_LOG" 2>&1 && [ -s "$DEB.patched" ]; then
+        mv -f "$DEB.patched" "$DEB"
+        log_p "repacked OK: $(basename "$DEB")"
+    else
+        log_p "REPACK FAILED for $(basename "$DEB") (espacio en /data?) - original intacto"
+        rm -f "$DEB.patched" 2>/dev/null
+    fi
+    echo "$DEB"
+    rm -rf "$WORK"
+done
+rm -rf "$WORK" 2>/dev/null
+exit 0
+HOOK
+        chmod +x "$DEB_PATCH_BIN" 2>/dev/null
+        echo "$SHIM_WANT" > "$SHIM_VER" 2>/dev/null
+    fi
+    # 2) dpkg shim: wrap a real (unwrapped) dpkg binary whenever present.
     if [ ! -f "$DPKG_REAL" ] && [ -f "$PREFIX/bin/dpkg" ] && ! head -2 "$PREFIX/bin/dpkg" 2>/dev/null | grep -q 'dpkg.real'; then
         mv "$PREFIX/bin/dpkg" "$DPKG_REAL" 2>/dev/null
         cat > "$PREFIX/bin/dpkg" <<'WRAP'
 #!/data/data/io.mcpanel/files/usr/bin/bash
 # Shim: patch com.termux paths inside queued .debs, then exec the real dpkg.
-# Every step is logged — silent failures here cost hours of guessing.
 PREFIX="${PREFIX:-/data/data/io.mcpanel/files/usr}"
 SHIM_LOG="$PREFIX/var/log/mc-dpkg-shim.log"
 log_shim() { echo "[shim $(date '+%H:%M:%S')] $*" >> "$SHIM_LOG" 2>/dev/null; }
 mkdir -p "$PREFIX/var/log" 2>/dev/null
 log_shim "dpkg $*"
+patch_one() {
+    log_shim "patching $(basename "$1")"
+    if ! OUT=$("$PREFIX/bin/mc-deb-patch" <<<"$1" 2>&1); then
+        log_shim "PATCHER FAILED for $1: $OUT"
+    fi
+}
 ARGS=()
 for a in "$@"; do
     case "$a" in
-        *.deb)
-            if [ -f "$a" ]; then
-                log_shim "patching $(basename "$a")"
-                if ! OUT=$("$PREFIX/bin/mc-deb-patch" <<<"$a" 2>&1); then
-                    log_shim "PATCHER FAILED for $a: $OUT"
-                else
-                    case "$OUT" in *"not unpackable"*|*"repack failed"*) log_shim "patcher note: $OUT" ;; esac
-                fi
+        *.deb) [ -f "$a" ] && patch_one "$a" ;;
+        *)
+            # apt big installs: dpkg --unpack --recursive <dir> - patch ALL
+            if [ -d "$a" ]; then
+                for d in "$a"/*.deb; do [ -f "$d" ] && patch_one "$d"; done
             fi
             ;;
     esac
@@ -107,86 +176,6 @@ exit $RC
 WRAP
         chmod +x "$PREFIX/bin/dpkg" 2>/dev/null
     fi
-    if [ ! -x "$DEB_PATCH_BIN" ]; then
-        cat > "$DEB_PATCH_BIN" <<'HOOK'
-#!/data/data/io.mcpanel/files/usr/bin/bash
-# Rewrites com.termux → io.mcpanel inside .debs before dpkg unpacks them.
-# Reads deb paths on stdin (called once per deb by the dpkg shim).
-# Both strings are exactly 10 chars: same-length byte replacement keeps
-# ELF offsets and tar offsets intact.
-PREFIX="${PREFIX:-/data/data/io.mcpanel/files/usr}"
-PATCHED_DIR="$PREFIX/var/cache/apt/mc-patched"
-PATCH_LOG="$PREFIX/var/log/mc-deb-patch.log"
-log_p() { echo "[patch $(date '+%H:%M:%S')] $*" >> "$PATCH_LOG" 2>/dev/null; }
-mkdir -p "$PATCHED_DIR" "$PREFIX/var/log" 2>/dev/null
-# reclaim space: work dirs from previous crashed runs
-rm -rf "$PATCHED_DIR"/.work.* 2>/dev/null
-WORK="$PATCHED_DIR/.work.$$"
-while IFS= read -r DEB; do
-    case "$DEB" in *.deb) ;; *) continue ;; esac
-    [ -f "$DEB" ] || continue
-    log_p "processing $(basename "$DEB") ($(wc -c < "$DEB") bytes)"
-    # interrupted earlier? a completed repack sibling is authoritative
-    if [ -f "$DEB.patched" ] && [ -s "$DEB.patched" ]; then
-        mv -f "$DEB.patched" "$DEB" 2>/dev/null
-        echo "$DEB"; continue
-    fi
-    rm -rf "$WORK"; mkdir -p "$WORK"
-    if ! dpkg-deb -R "$DEB" "$WORK" >>"$PATCH_LOG" 2>&1; then
-        # second chance: extract the raw data.tar (covers rare dpkg-deb -R
-        # failures); tar ships in the bootstrap
-        log_p "dpkg-deb -R failed on $(basename "$DEB") — intentando con tar"
-        rm -rf "$WORK"; mkdir -p "$WORK"
-        if ! dpkg-deb --fsys-tarfile "$DEB" 2>>"$PATCH_LOG" | tar -xf - -C "$WORK" 2>>"$PATCH_LOG"; then
-            log_p "EXTRACT FAILED for $DEB (¿espacio en /data?) — entregando SIN patchear: dpkg fallará con 'error creating directory ./data/data/com.termux' si este deb contiene esas rutas"
-            echo "$DEB"; continue
-        fi
-    fi
-    # 1) the tree inside the deb is ./data/data/com.termux — rename it
-    if [ -d "$WORK/data/data/com.termux" ]; then
-        mv "$WORK/data/data/com.termux" "$WORK/data/data/io.mcpanel" 2>/dev/null
-    fi
-    # 2) rewrite path strings inside every packaged file (scripts, configs,
-    #    maintainer scripts, ELF). GNU sed replacement is same-length →
-    #    ELF offsets intact.
-    find "$WORK" -type f -size -8M -print0 2>/dev/null | \
-        xargs -0 -r grep -l -a -F 'com.termux' 2>/dev/null | \
-    while IFS= read -r f; do
-        sed -i 's/com\.termux/io.mcpanel/g' "$f" 2>/dev/null || true
-    done
-    # 2b) symlinks with absolute com.termux targets (sed can't touch them;
-    # openjdk ships several inside lib/jvm)
-    find "$WORK" -type l -print0 2>/dev/null | \
-    while IFS= read -r -d '' l; do
-        t=$(readlink "$l") || continue
-        case "$t" in *com.termux*)
-            rm -f "$l"
-            ln -s "${t//com.termux/io.mcpanel}" "$l" 2>/dev/null
-        ;; esac
-    done
-    # restore exec bits on bin-ish paths (be safe)
-    [ -d "$WORK/data/data/io.mcpanel/usr/bin" ] && chmod 755 "$WORK/data/data/io.mcpanel/usr/bin"/* 2>/dev/null
-    # 3) repack to a sibling file; replace the original ONLY on success.
-    #    (Repacking in place destroys the deb on failure — e.g. disk full —
-    #    and dpkg then aborts the whole transaction with error code 1.)
-    if dpkg-deb -b "$WORK" "$DEB.patched" >>"$PATCH_LOG" 2>&1 && [ -s "$DEB.patched" ]; then
-        mv -f "$DEB.patched" "$DEB"
-        log_p "repacked OK: $(basename "$DEB")"
-    else
-        log_p "REPACK FAILED for $(basename "$DEB") (¿espacio en /data?) — original intacto"
-        rm -f "$DEB.patched" 2>/dev/null   # keep original intact
-    fi
-    echo "$DEB"
-    rm -rf "$WORK"
-done
-rm -rf "$WORK" 2>/dev/null
-exit 0
-HOOK
-        chmod +x "$DEB_PATCH_BIN" 2>/dev/null
-    fi
-    # dpkg status db ships populated in the bootstrap (83 pkgs); nothing to
-    # seed. First `apt update` works (proven on device); the only fatal issue
-    # was the com.termux paths inside downloaded .debs — solved by the hook.
 }
 
 mkdir -p "$SERVER_DIR" "$INBOX" "$SCRIPT_DIR" 2>/dev/null

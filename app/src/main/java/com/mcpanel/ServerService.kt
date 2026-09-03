@@ -49,6 +49,13 @@ class ServerService : Service() {
                 try {
                     val log = Embed.lastRunLog(this)
                     log.parentFile?.mkdirs()
+                    // bounded log: keep the tail (last ~256 KB), never grows forever
+                    try {
+                        if (log.length() > 512 * 1024) {
+                            val txt = log.readText()
+                            log.writeText(txt.substring(txt.length - 256 * 1024))
+                        }
+                    } catch (_: Exception) {}
                     val head = "── " + java.util.Date().toString() + "  mc_manager " + cmd +
                             (if (args.isNotEmpty()) " " + args.joinToString(" ") else "") +
                             "  →  exit " + rc + "\n"
