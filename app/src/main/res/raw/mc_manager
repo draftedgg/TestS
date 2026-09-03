@@ -94,16 +94,23 @@ WRAP
         cat > "$DEB_PATCH_BIN" <<'HOOK'
 #!/data/data/io.mcpanel/files/usr/bin/bash
 # Rewrites com.termux → io.mcpanel inside .debs before dpkg unpacks them.
-# apt Pre-Install-Pkgs (protocol v2) feeds the queued .deb paths on stdin.
+# Reads deb paths on stdin (called once per deb by the dpkg shim).
 # Both strings are exactly 10 chars: same-length byte replacement keeps
 # ELF offsets and tar offsets intact.
+PREFIX="${PREFIX:-/data/data/io.mcpanel/files/usr}"
 PATCHED_DIR="$PREFIX/var/cache/apt/mc-patched"
 mkdir -p "$PATCHED_DIR" 2>/dev/null
+# reclaim space: work dirs from previous crashed runs
+rm -rf "$PATCHED_DIR"/.work.* 2>/dev/null
 WORK="$PATCHED_DIR/.work.$$"
 while IFS= read -r DEB; do
-    case "$DEB" in *VERSION*) continue ;; esac
+    case "$DEB" in *.deb) ;; *) continue ;; esac
     [ -f "$DEB" ] || continue
-    case "$DEB" in "$PATCHED_DIR"/*) echo "$DEB"; continue ;; esac
+    # interrupted earlier? a completed repack sibling is authoritative
+    if [ -f "$DEB.patched" ] && [ -s "$DEB.patched" ]; then
+        mv -f "$DEB.patched" "$DEB" 2>/dev/null
+        echo "$DEB"; continue
+    fi
     rm -rf "$WORK"; mkdir -p "$WORK"
     if ! dpkg-deb -R "$DEB" "$WORK" >/dev/null 2>&1; then
         echo "$DEB"; continue        # not unpackable: hand through unchanged
@@ -120,15 +127,30 @@ while IFS= read -r DEB; do
     while IFS= read -r f; do
         sed -i 's/com\.termux/io.mcpanel/g' "$f" 2>/dev/null || true
     done
-    # restore exec bits on bin-ish paths (sed -i keeps mode, but be safe)
+    # 2b) symlinks with absolute com.termux targets (sed can't touch them;
+    # openjdk ships several inside lib/jvm)
+    find "$WORK" -type l -print0 2>/dev/null | \
+    while IFS= read -r -d '' l; do
+        t=$(readlink "$l") || continue
+        case "$t" in *com.termux*)
+            rm -f "$l"
+            ln -s "${t//com.termux/io.mcpanel}" "$l" 2>/dev/null
+        ;; esac
+    done
+    # restore exec bits on bin-ish paths (be safe)
     [ -d "$WORK/data/data/io.mcpanel/usr/bin" ] && chmod 755 "$WORK/data/data/io.mcpanel/usr/bin"/* 2>/dev/null
-    # 3) repack in place (dpkg-deb uses its internal md5; no md5sum needed)
-    if ! dpkg-deb -b "$WORK" "$DEB" >/dev/null 2>&1; then
-        :   # repack failed: file may be corrupt; still hand it through
+    # 3) repack to a sibling file; replace the original ONLY on success.
+    #    (Repacking in place destroys the deb on failure — e.g. disk full —
+    #    and dpkg then aborts the whole transaction with error code 1.)
+    if dpkg-deb -b "$WORK" "$DEB.patched" >/dev/null 2>&1 && [ -s "$DEB.patched" ]; then
+        mv -f "$DEB.patched" "$DEB"
+    else
+        rm -f "$DEB.patched" 2>/dev/null   # keep original intact
     fi
     echo "$DEB"
     rm -rf "$WORK"
 done
+rm -rf "$WORK" 2>/dev/null
 exit 0
 HOOK
         chmod +x "$DEB_PATCH_BIN" 2>/dev/null
@@ -247,6 +269,7 @@ cmd_bootstrap() {
     command -v playitd >/dev/null 2>&1 && PLAYIT_BIN="playitd"
     # TMPDIR convention: $PREFIX/tmp (matches the app's check and Termux)
     mkdir -p "$PREFIX/tmp" "${PREFIX%/usr}/tmp" 2>/dev/null
+    apt-get clean >> "$INSTALL_LOG" 2>&1 || true
     : > "$PREFIX/tmp/bootstrap-done"
     log "OK"  "bootstrap: done"
     write_state ".last_action = \"bootstrap\" .last_error = null"
@@ -271,11 +294,27 @@ cmd_install() {
     log "INF" "install: $LOADER $VERSION ram=$RAM_MIN/$RAM_MAX"
     write_state ".last_action = \"install\" .loader = \"$LOADER\" .version = \"$VERSION\" .ram_min = \"$RAM_MIN\" .ram_max = \"$RAM_MAX\" .last_error = null"
 
-    # java
+    # java: install AND verify — dpkg can fail mid-transaction (space,
+    # unpack error) and the old code logged "ready" anyway, burning the
+    # loader attempts on a missing binary.
     local JPKG; JPKG=$(java_pkg_for "$VERSION")
+    local FREE_KB; FREE_KB=$(df -k "${PREFIX%/usr}" 2>/dev/null | awk 'NR==2{print $4}')
+    if [ -n "$FREE_KB" ] && [ "$FREE_KB" -lt 786432 ]; then
+        log "WRN" "install: solo $((FREE_KB/1024)) MB libres; openjdk necesita ~700 MB descomprimido"
+    fi
     log "INF" "install: java $JPKG"
+    apt-get clean >> "$INSTALL_LOG" 2>&1 || true   # free cache: openjdk chain is huge
     pkg install -y "$JPKG" >> "$INSTALL_LOG" 2>&1
-    log "OK"  "install: java ready"
+    if ! command -v java >/dev/null 2>&1; then
+        log "WRN" "install: java ausente tras instalar; reintentando con fix-broken"
+        apt-get install -y -f "$JPKG" >> "$INSTALL_LOG" 2>&1
+    fi
+    if ! command -v java >/dev/null 2>&1; then
+        log "ERR" "install: java no quedó instalado — ver install.log (causa típica: falta de espacio en /data)"
+        state_set_error "install: java ($JPKG) no se pudo instalar"
+        exit 1
+    fi
+    log "OK"  "install: java $(java -version 2>&1 | head -1)"
 
     mkdir -p "$SERVER_DIR"
 
