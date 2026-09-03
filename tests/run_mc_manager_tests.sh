@@ -101,6 +101,29 @@ run frobnicate
 echo "$(jq -r '.last_error' "$STATE")" | grep -q 'unknown command' && PASS "unknown command rejects" || FAIL "unknown command"
 [ "$(find "$MC_SHARED" -name '.state.json.tmp' | wc -l)" -eq 0 ] && PASS "atomic temp cleaned" || FAIL "atomic temp remains"
 
+# ─── embedded prefix (MCPanel app) ────────────────────────────────────
+EMB="$TMP/embprefix"
+export MC_EMBEDDED=1
+unset MC_TMUX_MARKER 2>/dev/null
+run() { PREFIX="$EMB" bash "$SCRIPT" "$@" >/dev/null 2>&1; }
+run status
+[ -f "$EMB/etc/apt/apt.conf.d/99mcpanel" ] && PASS "embedded: apt conf installed" || FAIL "embedded: apt conf missing"
+[ -d "$EMB/var/lib/apt/lists/partial" ] && PASS "embedded: apt dirs" || FAIL "embedded: apt dirs"
+[ -x "$EMB/bin/mc-deb-patch" ] && PASS "embedded: deb-patch hook created" || FAIL "embedded: deb-patch missing"
+# shim only wraps when a real dpkg binary exists in the prefix
+if [ -f "$EMB/bin/dpkg" ] && ! head -1 "$EMB/bin/dpkg" | grep -q '^#!'; then
+  PASS "embedded: real dpkg left untouched"
+else
+  printf '#!/bin/sh\necho real-dpkg\n' > "$EMB/bin/dpkg"
+  chmod +x "$EMB/bin/dpkg"
+  run status
+  grep -q 'dpkg.real' "$EMB/bin/dpkg" && PASS "embedded: dpkg shim installed" || FAIL "embedded: dpkg shim"
+  [ -f "$EMB/bin/dpkg.real" ] && PASS "embedded: dpkg.real preserved" || FAIL "embedded: dpkg.real missing"
+  "$EMB/bin/dpkg" --foo >/dev/null 2>&1
+  [ -x "$EMB/bin/dpkg.real" ] && PASS "embedded: shim executable" || FAIL "embedded: shim not exec"
+fi
+unset MC_EMBEDDED
+
 printf '\nFailures: %s\n' "$FAILS"
 [ "$FAILS" -eq 0 ] && printf 'ALL TESTS PASSED\n'
 rm -rf "$TMP"

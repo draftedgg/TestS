@@ -25,6 +25,9 @@ object Embed {
     const val PREFIX_PATH = "/data/data/io.mcpanel/files/usr"
     const val HOME_PATH = "/data/data/io.mcpanel/files/home"
 
+    /** Apt hook: rewrites com.termux paths inside downloaded .debs. */
+    const val APT_HOOK_CONF = "DPkg::Pre-Install-Pkgs { \"/data/data/io.mcpanel/files/usr/bin/mc-deb-patch\" \"2\"; };\n"
+
     /** Pick the bootstrap matching the device. 32-bit-only devices are the
      *  common case where an aarch64 bootstrap silently fails to exec. */
     fun bootstrapAsset(): String {
@@ -177,7 +180,14 @@ object Embed {
             val zin = ZipInputStream(zipBytes.buffered())
             while (true) {
                 val e = zin.nextEntry ?: break
-                if (e.isDirectory) { zin.closeEntry(); continue }
+                if (e.isDirectory) {
+                    // Empty directories matter: apt expects etc/apt/apt.conf.d,
+                    // var/log/apt, var/cache/apt/archives/partial to exist.
+                    if (e.name.contains("..") || e.name.startsWith("/")) { zin.closeEntry(); continue }
+                    File(root, e.name).mkdirs()
+                    zin.closeEntry()
+                    continue
+                }
                 val bytes = zin.readBytes()
                 zin.closeEntry()
                 if (e.name.contains("..") || e.name.startsWith("/")) continue // zip-slip guard
@@ -202,7 +212,13 @@ object Embed {
             if (!File(root, "bin/bash").exists() || !File(root, "bin/apt").exists()) return false
             createSymlinks(ctx)
             File(root, "tmp").mkdirs()
+            File(root, "var/cache/apt/archives/partial").mkdirs()
+            File(root, "var/log/apt").mkdirs()
+            File(root, "var/lib/dpkg/updates").mkdirs()
+            File(root, "var/lib/dpkg/info").mkdirs()
+            File(root, "var/lib/dpkg/triggers").mkdirs()
             writeProfile(ctx)
+            writeAptHook(ctx)
             installScript(ctx)
             if (marker != null) try { File(root, marker).writeText(deviceAbi()) } catch (_: Exception) {}
             return true
@@ -234,6 +250,14 @@ object Embed {
                 }
             }
         } catch (_: Exception) {}
+    }
+
+    /** Apt Pre-Install-Pkgs hook: every .deb dpkg would unpack passes
+     *  through mc-deb-patch first (the debs embed com.termux paths). */
+    private fun writeAptHook(ctx: Context) {
+        val conf = File(prefix(ctx), "etc/apt/apt.conf.d/99mcpanel")
+        conf.parentFile?.mkdirs()
+        conf.writeText(APT_HOOK_CONF)
     }
 
     private fun writeProfile(ctx: Context) {
