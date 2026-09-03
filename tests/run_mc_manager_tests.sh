@@ -107,7 +107,7 @@ export MC_EMBEDDED=1
 unset MC_TMUX_MARKER 2>/dev/null
 run() { PREFIX="$EMB" bash "$SCRIPT" "$@" >/dev/null 2>&1; }
 run status
-[ -f "$EMB/etc/apt/apt.conf.d/99mcpanel" ] && PASS "embedded: apt conf installed" || FAIL "embedded: apt conf missing"
+[ ! -f "$EMB/etc/apt/apt.conf.d/99mcpanel" ] && PASS "embedded: no apt hook conf (dpkg shim only)" || FAIL "embedded: stale apt conf present"
 [ -d "$EMB/var/lib/apt/lists/partial" ] && PASS "embedded: apt dirs" || FAIL "embedded: apt dirs"
 [ -x "$EMB/bin/mc-deb-patch" ] && PASS "embedded: deb-patch hook created" || FAIL "embedded: deb-patch missing"
 # shim only wraps when a real dpkg binary exists in the prefix

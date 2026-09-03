@@ -67,8 +67,11 @@ ensure_embedded_env() {
     # embed those paths in data.tar member names — dpkg would otherwise try
     # to create /data/data/com.termux at the real root and fail).
     mkdir -p "$PREFIX/bin" "$PREFIX/etc/apt/apt.conf.d" 2>/dev/null
-    printf '%s\n' "DPkg::Pre-Install-Pkgs { \"$DEB_PATCH_BIN\" \"2\"; };" \
-        > "$PREFIX/etc/apt/apt.conf.d/99mcpanel" 2>/dev/null
+    # The dpkg shim below is the single interception point for .deb path
+    # patching. A Pre-Install-Pkgs hook proved redundant AND fragile: apt
+    # runs every item in the block as its own script (a stray "2" item made
+    # apt fail with "script 2 not found"). Remove any stale conf.
+    rm -f "$PREFIX/etc/apt/apt.conf.d/99mcpanel" 2>/dev/null
     local DPKG_REAL="$PREFIX/bin/dpkg.real"
     if [ ! -f "$DPKG_REAL" ] && [ -f "$PREFIX/bin/dpkg" ] && ! head -2 "$PREFIX/bin/dpkg" 2>/dev/null | grep -q 'dpkg.real'; then
         mv "$PREFIX/bin/dpkg" "$DPKG_REAL" 2>/dev/null
