@@ -78,15 +78,32 @@ ensure_embedded_env() {
         cat > "$PREFIX/bin/dpkg" <<'WRAP'
 #!/data/data/io.mcpanel/files/usr/bin/bash
 # Shim: patch com.termux paths inside queued .debs, then exec the real dpkg.
+# Every step is logged — silent failures here cost hours of guessing.
 PREFIX="${PREFIX:-/data/data/io.mcpanel/files/usr}"
+SHIM_LOG="$PREFIX/var/log/mc-dpkg-shim.log"
+log_shim() { echo "[shim $(date '+%H:%M:%S')] $*" >> "$SHIM_LOG" 2>/dev/null; }
+mkdir -p "$PREFIX/var/log" 2>/dev/null
+log_shim "dpkg $*"
 ARGS=()
 for a in "$@"; do
     case "$a" in
-        *.deb) [ -f "$a" ] && "$PREFIX/bin/mc-deb-patch" <<<"$a" >/dev/null 2>&1 ;;
+        *.deb)
+            if [ -f "$a" ]; then
+                log_shim "patching $(basename "$a")"
+                if ! OUT=$("$PREFIX/bin/mc-deb-patch" <<<"$a" 2>&1); then
+                    log_shim "PATCHER FAILED for $a: $OUT"
+                else
+                    case "$OUT" in *"not unpackable"*|*"repack failed"*) log_shim "patcher note: $OUT" ;; esac
+                fi
+            fi
+            ;;
     esac
     ARGS+=("$a")
 done
-exec "$PREFIX/bin/dpkg.real" "${ARGS[@]}"
+"$PREFIX/bin/dpkg.real" "${ARGS[@]}"
+RC=$?
+log_shim "dpkg exit $RC"
+exit $RC
 WRAP
         chmod +x "$PREFIX/bin/dpkg" 2>/dev/null
     fi
@@ -99,21 +116,31 @@ WRAP
 # ELF offsets and tar offsets intact.
 PREFIX="${PREFIX:-/data/data/io.mcpanel/files/usr}"
 PATCHED_DIR="$PREFIX/var/cache/apt/mc-patched"
-mkdir -p "$PATCHED_DIR" 2>/dev/null
+PATCH_LOG="$PREFIX/var/log/mc-deb-patch.log"
+log_p() { echo "[patch $(date '+%H:%M:%S')] $*" >> "$PATCH_LOG" 2>/dev/null; }
+mkdir -p "$PATCHED_DIR" "$PREFIX/var/log" 2>/dev/null
 # reclaim space: work dirs from previous crashed runs
 rm -rf "$PATCHED_DIR"/.work.* 2>/dev/null
 WORK="$PATCHED_DIR/.work.$$"
 while IFS= read -r DEB; do
     case "$DEB" in *.deb) ;; *) continue ;; esac
     [ -f "$DEB" ] || continue
+    log_p "processing $(basename "$DEB") ($(wc -c < "$DEB") bytes)"
     # interrupted earlier? a completed repack sibling is authoritative
     if [ -f "$DEB.patched" ] && [ -s "$DEB.patched" ]; then
         mv -f "$DEB.patched" "$DEB" 2>/dev/null
         echo "$DEB"; continue
     fi
     rm -rf "$WORK"; mkdir -p "$WORK"
-    if ! dpkg-deb -R "$DEB" "$WORK" >/dev/null 2>&1; then
-        echo "$DEB"; continue        # not unpackable: hand through unchanged
+    if ! dpkg-deb -R "$DEB" "$WORK" >>"$PATCH_LOG" 2>&1; then
+        # second chance: extract the raw data.tar (covers rare dpkg-deb -R
+        # failures); tar ships in the bootstrap
+        log_p "dpkg-deb -R failed on $(basename "$DEB") — intentando con tar"
+        rm -rf "$WORK"; mkdir -p "$WORK"
+        if ! dpkg-deb --fsys-tarfile "$DEB" 2>>"$PATCH_LOG" | tar -xf - -C "$WORK" 2>>"$PATCH_LOG"; then
+            log_p "EXTRACT FAILED for $DEB (¿espacio en /data?) — entregando SIN patchear: dpkg fallará con 'error creating directory ./data/data/com.termux' si este deb contiene esas rutas"
+            echo "$DEB"; continue
+        fi
     fi
     # 1) the tree inside the deb is ./data/data/com.termux — rename it
     if [ -d "$WORK/data/data/com.termux" ]; then
@@ -142,9 +169,11 @@ while IFS= read -r DEB; do
     # 3) repack to a sibling file; replace the original ONLY on success.
     #    (Repacking in place destroys the deb on failure — e.g. disk full —
     #    and dpkg then aborts the whole transaction with error code 1.)
-    if dpkg-deb -b "$WORK" "$DEB.patched" >/dev/null 2>&1 && [ -s "$DEB.patched" ]; then
+    if dpkg-deb -b "$WORK" "$DEB.patched" >>"$PATCH_LOG" 2>&1 && [ -s "$DEB.patched" ]; then
         mv -f "$DEB.patched" "$DEB"
+        log_p "repacked OK: $(basename "$DEB")"
     else
+        log_p "REPACK FAILED for $(basename "$DEB") (¿espacio en /data?) — original intacto"
         rm -f "$DEB.patched" 2>/dev/null   # keep original intact
     fi
     echo "$DEB"
@@ -305,6 +334,15 @@ cmd_install() {
     log "INF" "install: java $JPKG"
     apt-get clean >> "$INSTALL_LOG" 2>&1 || true   # free cache: openjdk chain is huge
     pkg install -y "$JPKG" >> "$INSTALL_LOG" 2>&1
+    local PKG_RC=$?
+    if [ "$PKG_RC" -ne 0 ]; then
+        log "ERR" "install: pkg terminó con código $PKG_RC — detalle en install.log y $PREFIX/var/log/mc-dpkg-shim.log"
+        # dump the shim + patcher logs into install.log so the app's log
+        # screen (which only tails install.log) shows the REAL dpkg error
+        for lf in "$PREFIX/var/log/mc-dpkg-shim.log" "$PREFIX/var/log/mc-deb-patch.log"; do
+            [ -f "$lf" ] && { log "INF" "── $lf (últimas líneas) ──"; tail -n 40 "$lf" >> "$INSTALL_LOG" 2>/dev/null; }
+        done
+    fi
     if ! command -v java >/dev/null 2>&1; then
         log "WRN" "install: java ausente tras instalar; reintentando con fix-broken"
         apt-get install -y -f "$JPKG" >> "$INSTALL_LOG" 2>&1
