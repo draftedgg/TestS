@@ -178,7 +178,7 @@ WRAP
     fi
 }
 
-mkdir -p "$SERVER_DIR" "$INBOX" "$SCRIPT_DIR" 2>/dev/null
+mkdir -p "$SHARED" "$SERVER_DIR" "$INBOX" "$SCRIPT_DIR" 2>/dev/null
 touch "$INSTALL_LOG" "$CONSOLE_LOG" 2>/dev/null
 ensure_embedded_env 2>/dev/null || true
 
