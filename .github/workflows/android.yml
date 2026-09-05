@@ -23,7 +23,25 @@ jobs:
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "ndk;26.1.10909125"
+      - name: Decode release keystore (from secrets)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Missing Actions secret KEYSTORE_B64 (base64 of the .jks). Add it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > /tmp/mcpanel-release.jks
+          if [ ! -s /tmp/mcpanel-release.jks ]; then
+            echo "::error::KEYSTORE_B64 did not decode to a non-empty keystore."
+            exit 1
+          fi
       - name: Build release (armv7 + armv8)
+        env:
+          KEYSTORE_PATH: /tmp/mcpanel-release.jks
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASS }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           set -o pipefail
           gradle assembleArmv7Release assembleArmv8Release --no-daemon --stacktrace 2>&1 | tee build.log || true

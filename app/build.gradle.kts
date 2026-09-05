@@ -31,12 +31,25 @@ android { namespace = "com.mcpanel"; compileSdk = 35
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
 
     lint { checkReleaseBuilds = false; abortOnError = false }
+
+    // Stable signing key: the CI workflow decodes the KEYSTORE_B64 secret
+    // (never committed; repo is public) into a .jks and passes passwords via
+    // env. One fixed signature across every build means a new APK installs
+    // OVER the previous one, preserving /data/data (embedded env, worlds).
+    // Falls back to the debug key when env vars are absent (local builds).
+    val useStableKey = System.getenv("KEYSTORE_PASS") != null
+    signingConfigs {
+        create("stable") {
+            storeFile = file(System.getenv("KEYSTORE_PATH") ?: "release-key.jks")
+            storePassword = System.getenv("KEYSTORE_PASS") ?: ""
+            keyAlias = System.getenv("KEY_ALIAS") ?: "mcpanel"
+            keyPassword = System.getenv("KEY_PASS") ?: System.getenv("KEYSTORE_PASS") ?: ""
+        }
+    }
     buildTypes { release {
         isMinifyEnabled = true
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-        // Signed with the debug key so the APK is installable via sideload.
-        // Replace with a real release keystore for public distribution.
-        signingConfig = signingConfigs.getByName("debug")
+        signingConfig = if (useStableKey) signingConfigs.getByName("stable") else signingConfigs.getByName("debug")
     } }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
