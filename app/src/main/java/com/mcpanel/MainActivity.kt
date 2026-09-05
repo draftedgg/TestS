@@ -537,6 +537,7 @@ class MainActivity : Activity() {
                     LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
                 col.addView(row)
                 col.addBtn("Abrir playit.gg", Style.GHOST, height = 42f, marginTop = 10f) { open("https://playit.gg/account/tunnels") }
+                col.addBtn("Ver registro", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Registro del túnel", tunnelLog) }
             }
             else -> {
                 val lan = lanIp()
@@ -545,7 +546,7 @@ class MainActivity : Activity() {
                     col.addView(tv("Solo esta Wi-Fi", 12f, MUTED),
                         LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
                 }
-                col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel", Style.GHOST, height = 44f,
+                col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel playit.gg", Style.GHOST, height = 44f,
                     marginTop = 8f, enabled = !tunnelBusy) {
                     if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
                     runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },

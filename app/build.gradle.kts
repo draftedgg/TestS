@@ -7,7 +7,7 @@ android { namespace = "com.mcpanel"; compileSdk = 35
     // applicationId MUST be io.mcpanel: the bundled Termux bootstrap embeds
     // paths of the exact same length (10 chars) as com.termux; Embed.kt
     // byte-patches them at extraction time. Changing the length breaks ELFs.
-    defaultConfig { applicationId = "io.mcpanel"; minSdk = 26; targetSdk = 28; versionCode = 12; versionName = "0.11" }
+    defaultConfig { applicationId = "io.mcpanel"; minSdk = 26; targetSdk = 28; versionCode = 13; versionName = "0.12" }
 
     // One APK per architecture instead of a universal one: each flavor
     // bundles only its own Termux bootstrap (armv7 -> 32-bit arm, armv8 ->

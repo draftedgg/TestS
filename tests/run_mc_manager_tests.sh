@@ -19,7 +19,13 @@ cat > "$STUB/tmux" <<'EOF'
 marker="${MC_TMUX_MARKER:-/tmp/mc-tmux-marker}"
 case "${1:-}" in
   has-session) [ -f "$marker" ] && exit 0 || exit 1 ;;
-  new-session) mkdir -p "$(dirname "$marker")"; touch "$marker"; exit 0 ;;
+  new-session)
+    mkdir -p "$(dirname "$marker")"; touch "$marker"
+    # simulate the playit agent writing to tunnel.log (the real command truncates it on start)
+    if [ "${4:-}" = "playit" ] && [ -n "${MC_PLAYIT_SEED:-}" ]; then
+      printf '%s\n' "$MC_PLAYIT_SEED" >> "$MC_SHARED/tunnel.log"
+    fi
+    exit 0 ;;
   kill-session) rm -f "$marker"; exit 0 ;;
   send-keys|pipe-pane|list-sessions)
     # simulate graceful shutdown: 'stop' ends the session
@@ -128,10 +134,36 @@ printf 'tcp://server-abc.example.playit.gg:25565\n' > "$MC_SHARED/tunnel.log"
 run playit-status
 [ "$(jq -r '.playit.claimed' "$STATE")" = true ] && PASS "playit address claimed" || FAIL "playit address claimed"
 echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'example.playit.gg' && PASS "playit address stored" || FAIL "playit address stored"
+# modern formats: dashed claim codes, bare ply.gg / joinmc.link addresses
+printf 'Open this link to finish setting up playit:\nhttps://playit.gg/claim/abc-def-123\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'claim/abc-def-123' && PASS "playit dashed claim kept whole" || FAIL "playit dashed claim"
+printf 'your-server.gl.at.ply.gg:12345\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+[ "$(jq -r '.playit.claimed' "$STATE")" = true ] && PASS "playit bare ply.gg claimed" || FAIL "playit bare ply.gg claimed"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'gl.at.ply.gg:12345' && PASS "playit bare ply.gg stored" || FAIL "playit bare ply.gg stored"
+printf 'myserver.joinmc.link\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'joinmc.link' && PASS "playit joinmc.link stored" || FAIL "playit joinmc.link"
+printf 'https://playit.gg/claim/abc-def-123\nTunnel online at tcp://s1.gl.at.ply.gg:1111\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'ply.gg:1111' && PASS "playit address beats stale claim" || FAIL "playit address priority"
 rm -f "$MC_TMUX_MARKER"
 run playit-status
 [ "$(jq -r '.playit.running' "$STATE")" = false ] && PASS "playit stopped cleared" || FAIL "playit stopped cleared"
 [ "$(jq -r '.playit.address' "$STATE")" = null ] && PASS "playit stopped: address null" || FAIL "playit stopped: address null"
+
+# ─── playit-start: publishes ok, silence is an error (never silent OK)
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/playit"; chmod +x "$STUB/playit"
+touch "$MC_TMUX_MARKER"
+MC_PLAYIT_SEED='https://playit.gg/claim/xyz-789-abc' run playit-start
+[ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start ok" || FAIL "playit-start ok"
+[ "$(jq -r '.last_error' "$STATE")" = null ] && PASS "playit-start no error" || FAIL "playit-start error"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'claim/xyz-789-abc' && PASS "playit-start claim stored" || FAIL "playit-start claim stored"
+MC_PLAYIT_SEED= MC_PLAYIT_WAIT=2 run playit-start
+[ "$?" -ne 0 ] && PASS "playit-start silence rejects" || FAIL "playit-start silence exit"
+echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no publicó' && PASS "playit-start silence recorded" || FAIL "playit-start silence error"
+rm -f "$MC_TMUX_MARKER"
 
 # ─── embedded prefix (MCPanel app) ────────────────────────────────────
 EMB="$TMP/embprefix"

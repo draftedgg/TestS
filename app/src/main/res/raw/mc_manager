@@ -671,15 +671,19 @@ playit_digest() {
             CLAIM=$(head -1 "$HOME_DIR/.playit/claim_url" 2>/dev/null)
         fi
         if [ -f "$TUNNEL_LOG" ]; then
-            [ -z "$CLAIM" ] && CLAIM=$(grep -oE 'https://playit\.gg/claim/[A-Za-z0-9]+' "$TUNNEL_LOG" 2>/dev/null | head -1)
-            ADDR=$(grep -oE 'tcp://[^ ]+|udp://[^ ]+|https?://[A-Za-z0-9.-]+\.playit\.gg(:[0-9]+)?' "$TUNNEL_LOG" 2>/dev/null | grep -v '/claim/' | tail -1)
+            # modern claim codes contain dashes (abc-def-123)
+            [ -z "$CLAIM" ] && CLAIM=$(grep -oE 'https://playit\.gg/claim/[A-Za-z0-9_?=&%.-]+' "$TUNNEL_LOG" 2>/dev/null | head -1)
+            # modern addresses: tcp://h:port, *.playit.gg, *.ply.gg, *.joinmc.link — often bare
+            ADDR=$(grep -oE '(tcp|udp|https?)://[^[:space:]]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.(at\.ply\.gg|ply\.gg|playit\.gg|joinmc\.link)(:[0-9]+)?' "$TUNNEL_LOG" 2>/dev/null | grep -v '/claim/' | sed -e 's/[.,;:!?)]*$//' | tail -1)
         fi
     fi
     local upd=".playit.running = $RUN"
-    if [ -n "$CLAIM" ]; then
-        upd="$upd | .playit.claimed = false | .playit.address = \"$CLAIM\""
-    elif [ -n "$ADDR" ]; then
+    # address wins over claim: after the user claims, the log keeps the old
+    # claim line, so preferring claim would hide the ready address forever.
+    if [ -n "$ADDR" ]; then
         upd="$upd | .playit.claimed = true  | .playit.address = \"$ADDR\""
+    elif [ -n "$CLAIM" ]; then
+        upd="$upd | .playit.claimed = false | .playit.address = \"$CLAIM\""
     else
         upd="$upd | .playit.claimed = null  | .playit.address = null"
     fi
@@ -702,10 +706,16 @@ cmd_playit_start() {
     fi
     tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
     : > "$TUNNEL_LOG" 2>/dev/null || true
-    tmux new-session -d -s "$PLAYIT_SESSION" "$PLAYIT_BIN >> '$TUNNEL_LOG' 2>&1"
-    # wait until the agent prints its claim link / public address (or dies)
+    # stdbuf avoids block-buffering when stdout goes to a file (claim would
+    # otherwise sit in the buffer and the digest below sees an empty log)
+    local AGENT_PREFIX=""
+    command -v stdbuf >/dev/null 2>&1 && AGENT_PREFIX="stdbuf -o0 -e0 "
+    tmux new-session -d -s "$PLAYIT_SESSION" "${AGENT_PREFIX}$PLAYIT_BIN >> '$TUNNEL_LOG' 2>&1"
+    # wait until the agent prints its claim link / public address (or dies).
+    # test hook: MC_PLAYIT_WAIT overrides the 30s budget.
+    local WAIT="${MC_PLAYIT_WAIT:-30}"
     local i=0 A
-    while [ $i -lt 30 ]; do
+    while [ $i -lt "$WAIT" ]; do
         sleep 1; i=$((i + 1))
         if ! tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then
             playit_digest
@@ -716,6 +726,11 @@ cmd_playit_start() {
         A=$(state_field .playit.address)
         [ "$A" != "null" ] && [ -n "$A" ] && break
     done
+    A=$(state_field .playit.address)
+    if [ "$A" = "null" ] || [ -z "$A" ]; then
+        state_set_error "playit arrancó pero no publicó ningún enlace (pulsa Ver registro del túnel)"
+        exit 1
+    fi
     write_state '.last_action = "playit-start" .last_error = null'
     log "OK" "playit-start: session up"
 }
