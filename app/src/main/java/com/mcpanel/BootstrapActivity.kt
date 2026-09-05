@@ -59,7 +59,7 @@ class BootstrapActivity : Activity() {
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true }
         col.addView(bar)
         retry = Button(this).apply {
-            text = "REINTENTAR"; setTextColor(BLACK); setBackgroundColor(ACCENT); isAllCaps = true
+            text = "Reintentar"; setTextColor(BLACK); setBackgroundColor(ACCENT); isAllCaps = false
             minHeight = 0
             setPadding(32, 0, 32, 0)
             visibility = View.GONE
