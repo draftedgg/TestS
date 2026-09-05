@@ -898,7 +898,7 @@ class MainActivity : Activity() {
                 toast("Respaldo en proceso…")
                 scope.launch { delay(5000); if (tab == Tab.SETTINGS) render() }
             }
-            val backups = File(Embed.home(this@MainActivity), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyArray()
+            val backups = File(Embed.home(this@MainActivity), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
             if (backups.isEmpty()) {
                 addView(tv("(todavía no hay respaldos)", 12.5f, FAINT), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
             } else {
