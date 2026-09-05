@@ -29,12 +29,21 @@ Resultado: el preset por RAM física siempre gana; el botón "Cambiar RAM" (ram-
 **Fix:** escribir a `mc_manager.sh.tmp` + rename atómico.
 
 ### Menores
-- [ ] `STATE_TMP` (`mc_manager.sh:29`) es variable muerta — eliminar.
-- [ ] `backup` sin `save-off`/`save-all` → mundo puede quedar inconsistente con server encendido (`mc_manager.sh:586`).
-- [ ] WakeLock de descargas limitado a 15 min (`DownloadService.kt:40`) — jar grande en red lenta sigue sin lock.
-- [ ] `cmd_start`: salida de java ya redirigida a console.log Y `pipe-pane` al mismo archivo (`mc_manager.sh:535`) — redundante, posible duplicado.
-- [ ] `mod-install` borra el jar inválido del inbox (`mc_manager.sh:609`) — mejor conservarlo y solo avisar.
-- [ ] `clearError()` de la app reescribe state.json compitiendo con el script (`MainActivity.kt:327`) — frágil pero autocorrige.
+- [x] `STATE_TMP` (`mc_manager.sh:29`) es variable muerta — eliminado.
+- [x] `backup` sin `save-off`/`save-all` → mundo puede quedar inconsistente con server encendido (`mc_manager.sh:586`) — `cmd_backup` envía `save-all flush` por tmux antes de comprimir.
+- [x] WakeLock de descargas limitado a 15 min (`DownloadService.kt:40`) — jar grande en red lenta sigue sin lock — subido a 30 min.
+- [x] `cmd_start`: salida de java ya redirigida a console.log Y `pipe-pane` al mismo archivo (`mc_manager.sh:535`) — redundante, posible duplicado — quitado pipe-pane.
+- [x] `mod-install` borra el jar inválido del inbox (`mc_manager.sh:609`) — mejor conservarlo y solo avisar — renombra a `.invalid`.
+- [x] `clearError()` de la app reescribe state.json compitiendo con el script (`MainActivity.kt:327`) — frágil pero autocorrige.
+
+### Túnel playit v1.0.x — flujo nuevo (commit posterior)
+- [x] Scraping de stdout obsoleto: el daemon solo espera `secret_key` en `playit.toml` (`mc_manager.sh:cmd_playit_start`).
+- [x] Nuevo subcomando `playit-secret <key>` que guarda en `$HOME/.config/playit_gg/playit.toml` con permisos 600.
+- [x] Nuevo subcomando `playit-secret-clear` para reset.
+- [x] Estado `state.json`: nueva clave `playit.secret = true|false` (sin guardar el valor del secret).
+- [x] App: sección "Túnel playit.gg" en Ajustes con diálogo de pegado del secret.
+- [x] App: botón "Iniciar túnel playit.gg" en Inicio detecta falta de secret y abre el diálogo en vez de fallar ciegamente.
+- [x] Tests: 5 nuevos (sin secret → error, guardar → state + toml + 600, inválido → rechazado, con secret → arranca, clear → elimina toml).
 
 ## 3. Documentación (drift con el código)
 - [ ] README/REPORT aún describen el **modo Termux externo** (intents `com.termux.RUN_COMMAND`, `allow-external-apps=true`); la app 0.12 es 100 % embebida (`Embed.runManager`, ProcessBuilder interno).

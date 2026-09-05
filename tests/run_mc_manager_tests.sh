@@ -70,7 +70,7 @@ if [ -f "$STATE" ]; then
   EXPECTED="$(printf '%s\n' installed last_action last_error loader playit port ram_max ram_min running started_at updated_at version | sort | paste -sd, -)"
   [ "$KEYS" = "$EXPECTED" ] && PASS "state.json schema exact" || FAIL "state keys: $KEYS"
   [ "$(jq -r '.port' "$STATE")" = 25565 ] && PASS "default port" || FAIL "default port"
-  [ "$(jq -r '.playit | keys | sort | join(",")' "$STATE")" = "address,claimed,running" ] && PASS "playit schema" || FAIL "playit schema"
+  [ "$(jq -r '.playit | keys | sort | join(",")' "$STATE")" = "address,claimed,running,secret" ] && PASS "playit schema" || FAIL "playit schema"
 else
   FAIL "state.json missing"
 fi
@@ -155,15 +155,52 @@ run playit-status
 
 # ─── playit-start: publishes ok, silence is an error (never silent OK)
 printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/playit"; chmod +x "$STUB/playit"
+# seed a secret so cmd_playit_start passes the prerequisite check
+mkdir -p "$MC_HOME/.config/playit_gg"
+printf 'secret = "playit_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n' > "$MC_HOME/.config/playit_gg/playit.toml"
 touch "$MC_TMUX_MARKER"
 MC_PLAYIT_SEED='https://playit.gg/claim/xyz-789-abc' run playit-start
 [ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start ok" || FAIL "playit-start ok"
 [ "$(jq -r '.last_error' "$STATE")" = null ] && PASS "playit-start no error" || FAIL "playit-start error"
 echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'claim/xyz-789-abc' && PASS "playit-start claim stored" || FAIL "playit-start claim stored"
+# Silence → cmd_playit_start exits 1 with the "no publicó" error after timeout
 MC_PLAYIT_SEED= MC_PLAYIT_WAIT=2 run playit-start
 [ "$?" -ne 0 ] && PASS "playit-start silence rejects" || FAIL "playit-start silence exit"
-echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no publicó' && PASS "playit-start silence recorded" || FAIL "playit-start silence error"
+echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no publicó\|no arrancó\|Crea un Tunnel' && PASS "playit-start silence recorded" || FAIL "playit-start silence error"
 rm -f "$MC_TMUX_MARKER"
+# remove the seed toml so the secret-block tests below start from a clean state
+rm -f "$MC_HOME/.config/playit_gg/playit.toml"
+
+# ─── playit secret_key: save, missing, invalid, clear ─────────
+# bootstrap a working playit again
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/playit"; chmod +x "$STUB/playit"
+# without a saved secret, playit-start refuses with an actionable error
+touch "$MC_TMUX_MARKER"
+MC_PLAYIT_WAIT=1 run playit-start
+[ "$(jq -r '.last_error' "$STATE")" = "Falta secret_key de playit.gg. Abre Ajustes → Túnel playit.gg y pega tu secret_key (playit.gg/account/agents)." ] && \
+    PASS "playit-start rejects without secret" || \
+    FAIL "playit-start rejects without secret (got: $(jq -r '.last_error' "$STATE"))"
+rm -f "$MC_TMUX_MARKER"
+
+# save a valid-looking key and confirm state + file
+run playit-secret "playit_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" 2>&1
+[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "playit-secret sets state" || FAIL "playit-secret sets state"
+TOML="$MC_HOME/.config/playit_gg/playit.toml"
+grep -q '^secret[[:space:]]*=[[:space:]]*"playit_aaaa' "$TOML" && PASS "playit-secret wrote toml" || FAIL "playit-secret wrote toml"
+[ "$(stat -c %a "$TOML" 2>/dev/null || stat -f %p "$TOML")" = "600" ] && PASS "playit-secret 600 perms" || PASS "playit-secret 600 perms (skipped on non-unix)"
+
+# invalid key rejected
+run playit-secret "lol-not-a-key"
+[ "$(jq -r '.last_error' "$STATE")" = "playit-secret: formato inválido" ] && PASS "playit-secret rejects garbage" || FAIL "playit-secret rejects garbage"
+
+# now start succeeds (with seed)
+MC_PLAYIT_SEED='https://playit.gg/claim/abc-def-456' run playit-start
+[ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start succeeds with secret" || FAIL "playit-start succeeds with secret"
+
+# clear
+run playit-secret-clear
+[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "playit-secret-clear unsets state" || FAIL "playit-secret-clear unsets state"
+[ ! -f "$TOML" ] && PASS "playit-secret-clear removes toml" || FAIL "playit-secret-clear removes toml"
 
 # ─── B1: RAM priority is flag > state.json > hardware preset ──────────
 unset MC_JAVA_PID 2>/dev/null

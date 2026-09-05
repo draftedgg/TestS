@@ -549,6 +549,9 @@ class MainActivity : Activity() {
                 col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel playit.gg", Style.GHOST, height = 44f,
                     marginTop = 8f, enabled = !tunnelBusy) {
                     if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
+                    val st = readState()
+                    val hasSecret = st?.optJSONObject("playit")?.optBoolean("secret") == true
+                    if (!hasSecret) { openPlayitSecretDialog(); return@addBtn }
                     runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },
                         { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
                 }
@@ -866,6 +869,34 @@ class MainActivity : Activity() {
         section("Propiedades")
         col.addBtn("Editar propiedades", Style.SECONDARY, height = 44f, marginTop = 2f) { openPropsDialog() }
 
+        // ── túnel playit.gg ──
+        section("Túnel playit.gg")
+        val hasSecret = st.optJSONObject("playit")?.optBoolean("secret") == true
+        col.addView(tv(if (hasSecret) "Configurado" else "Sin configurar", 14f, if (hasSecret) ACCENT else MUTED, bold = true),
+            LinearLayout.LayoutParams(-1, -2))
+        if (!hasSecret) {
+            col.addView(tv("Crea una cuenta en playit.gg y genera un agent (Account → Agents). Pega el secret_key abajo.", 12f, MUTED),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f); bottomMargin = px(8f) })
+            col.addBtn("Configurar secret_key", Style.SECONDARY, height = 44f, marginTop = 2f) { openPlayitSecretDialog() }
+        } else {
+            col.addView(tv("El daemon usará este secret. Tras iniciarlo, crea un Tunnel en playit.gg/account/tunnels apuntando al puerto ${serverPort(st)}.", 12f, MUTED),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f); bottomMargin = px(8f) })
+            col.addBtn("Cambiar secret_key", Style.SECONDARY, height = 44f, marginTop = 2f) { openPlayitSecretDialog() }
+            col.addBtn("Quitar secret_key", Style.GHOST, height = 40f, marginTop = 4f) {
+                AlertDialog.Builder(this).setTitle("Quitar secret_key")
+                    .setMessage("El daemon no podrá iniciar hasta que pegues uno nuevo.")
+                    .setNegativeButton("Cancelar", null)
+                    .setPositiveButton("Quitar") { _, _ ->
+                        runTermux("playit-secret-clear")
+                        toast("Secret_key quitado.")
+                        scope.launch { delay(1500); render() }
+                    }.show()
+            }
+        }
+        col.addBtn("Abrir playit.gg/account/agents", Style.GHOST, height = 40f, marginTop = 6f) {
+            open("https://playit.gg/account/agents")
+        }
+
         // ── respaldos ──
         section("Respaldos")
         col.addBtn("Crear respaldo", Style.SECONDARY, height = 44f, marginTop = 2f) {
@@ -994,6 +1025,43 @@ class MainActivity : Activity() {
                 runTermux("prop", *pairs.toTypedArray())
                 toast("Guardado: aplica al reiniciar el servidor.")
             }.show()
+    }
+
+    // ── diálogo: secret_key de playit.gg ──────────────────────────────
+    private fun openPlayitSecretDialog() {
+        val input = EditText(this).apply {
+            hint = "playit_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
+            setBackgroundColor(Color.TRANSPARENT)
+            background = rounded(SURFACE, 12f, STROKE, 1)
+            setPadding(px(12f), 0, px(12f), 0)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSingleLine(true)
+        }
+        val wrap = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f))
+            addView(input, LinearLayout.LayoutParams(-1, px(46f)))
+            addView(tv("Se guarda en playit.toml con permisos 600. Nunca se muestra completo en pantalla.", 11.5f, FAINT),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+        }
+        AlertDialog.Builder(this)
+            .setTitle("secret_key de playit.gg")
+            .setView(ScrollView(this).apply { addView(wrap) })
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Guardar") { _, _ ->
+                val key = input.text.toString().trim()
+                if (key.length < 16) {
+                    toast("secret_key demasiado corto (mínimo 16 caracteres).")
+                    return@setPositiveButton
+                }
+                runTermux("playit-secret", key)
+                toast("Secret guardado.")
+                scope.launch { delay(1500); render() }
+            }
+            .setNeutralButton("Generar nuevo") { _, _ ->
+                open("https://playit.gg/account/agents")
+            }
+            .show()
     }
 
     // ── batería ───────────────────────────────────────────────────────
