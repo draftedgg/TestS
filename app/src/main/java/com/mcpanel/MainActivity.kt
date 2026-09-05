@@ -15,6 +15,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -928,7 +929,7 @@ class MainActivity : Activity() {
             colLbl.addView(tv("Mantener activo", 15f, TEXT, bold = true))
             colLbl.addView(tv("Con la pantalla apagada, el servidor sigue corriendo.", 12f, MUTED))
             row.addView(colLbl, LinearLayout.LayoutParams(0, -2, 1f))
-            val sw = Switch(this).apply { isChecked = keepAwakePref() }
+            val sw = Switch(this@MainActivity).apply { isChecked = keepAwakePref() }
             sw.setOnCheckedChangeListener { _, on ->
                 prefs.edit().putBoolean("keep_awake", on).apply()
                 if (on) KeepAliveService.want(this@MainActivity)
@@ -1059,7 +1060,7 @@ class MainActivity : Activity() {
     private fun openPropsDialog() {
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
         fun field(hint: String, key: String): EditText = EditText(this).apply {
-            setText(propValue(key)); hint = hint; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
+            setText(propValue(key)); this.hint = hint; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
             background = rounded(SURFACE, 12f, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
