@@ -37,7 +37,7 @@ class DownloadService : Service() {
         val afterCmd = intent.getStringExtra(EXTRA_AFTER_CMD)
         val afterArgs = intent.getStringArrayExtra(EXTRA_AFTER_ARGS)?.toList()
         val pm = getSystemService(POWER_SERVICE) as PowerManager
-        wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MCPanel:download").apply { acquire(15 * 60 * 1000L) }
+        wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MCPanel:download").apply { acquire(30 * 60 * 1000L) }
         startForeground(NOTIF_ID, buildNotification(name, -1))
         thread?.interrupt()
         thread = Thread {

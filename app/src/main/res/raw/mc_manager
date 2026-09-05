@@ -26,7 +26,8 @@ SERVER_DIR="$HOME_DIR/mcserver"
 SHARED="${MC_SHARED:-/storage/emulated/0/MCPanel}"
 INBOX="$SHARED/inbox"
 STATE_FILE="$SHARED/state.json"
-STATE_TMP="$SHARED/.state.json.tmp"
+# (atomic write goes through a jq-managed tmp + read-modify-write; no
+#  shared STATE_TMP is needed here — leave it implicit in jq.)
 CONSOLE_LOG="$SHARED/console.log"
 INSTALL_LOG="$SHARED/install.log"
 TUNNEL_LOG="$SHARED/tunnel.log"    # playit agent output (app tails it)
@@ -251,7 +252,14 @@ state_set_error() {
 }
 
 # ─── RAM presets (identical to original) ─────────────────────────────
+# Priority: explicit env/flag > state.json > hardware preset.
+# Without the early-return, cmd_install and cmd_start silently overwrite
+# whatever the caller chose with the hardware-derived default.
 detect_ram() {
+    if [ -n "${RAM_MIN:-}" ] && [ -n "${RAM_MAX:-}" ]; then
+        log "INF" "ram: keeping explicit $RAM_MIN/$RAM_MAX"
+        return 0
+    fi
     TOTAL_RAM=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
     if   [ "$TOTAL_RAM" -ge 8192 ]; then RAM_MIN="1G";   RAM_MAX="4G"
     elif [ "$TOTAL_RAM" -ge 6144 ]; then RAM_MIN="1G";   RAM_MAX="3G"
@@ -338,9 +346,14 @@ cmd_install() {
         esac
     done
     [ -z "$LOADER" ] || [ -z "$VERSION" ] && { state_set_error "install: loader/version required"; exit 1; }
-    detect_ram
-    [ -z "$RAM_MIN" ] && RAM_MIN="$(state_field .ram_min | sed 's/^null$//')"
-    [ -z "$RAM_MAX" ] && RAM_MAX="$(state_field .ram_max | sed 's/^null$//')"
+    # Flags first (already in RAM_MIN/RAM_MAX). Fill the gaps from state.json.
+    # detect_ram is a no-op when both are set; otherwise it derives a preset
+    # that we discard if state.json had a stored value.
+    if [ -z "${RAM_MIN:-}" ] || [ -z "${RAM_MAX:-}" ]; then
+        RAM_MIN="${RAM_MIN:-$(state_field .ram_min | sed 's/^null$//')}"
+        RAM_MAX="${RAM_MAX:-$(state_field .ram_max | sed 's/^null$//')}"
+        [ -z "${RAM_MIN:-}" ] || [ -z "${RAM_MAX:-}" ] && detect_ram
+    fi
 
     log "INF" "install: $LOADER $VERSION ram=$RAM_MIN/$RAM_MAX"
     write_state ".last_action = \"install\" .loader = \"$LOADER\" .version = \"$VERSION\" .ram_min = \"$RAM_MIN\" .ram_max = \"$RAM_MAX\" .last_error = null"
@@ -509,9 +522,11 @@ cmd_start() {
     fi
     # source config for paths/loader (single source of truth on device)
     [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
-    detect_ram
-    RAM_MIN="${RAM_MIN:-$(state_field .ram_min | sed 's/^null$//')}"
-    RAM_MAX="${RAM_MAX:-$(state_field .ram_max | sed 's/^null$//')}"
+    if [ -z "${RAM_MIN:-}" ] || [ -z "${RAM_MAX:-}" ]; then
+        RAM_MIN="${RAM_MIN:-$(state_field .ram_min | sed 's/^null$//')}"
+        RAM_MAX="${RAM_MAX:-$(state_field .ram_max | sed 's/^null$//')}"
+        [ -z "${RAM_MIN:-}" ] || [ -z "${RAM_MAX:-}" ] && detect_ram
+    fi
     RAM_MIN="${RAM_MIN:-256M}"; RAM_MAX="${RAM_MAX:-1G}"
 
     echo "eula=true" > "$SERVER_DIR/eula.txt"
@@ -531,8 +546,9 @@ cmd_start() {
     fi
     tmux new-session -d -s "$TMUX_SESSION" "$RUN_CMD" || { state_set_error "start: tmux failed"; exit 1; }
     sleep 1
-    # console pipe: tmux pane output -> shared console.log (app tails it)
-    tmux pipe-pane -t "$TMUX_SESSION" -o "cat >> $CONSOLE_LOG" 2>/dev/null
+    # The server's stdout/stderr is already redirected to $CONSOLE_LOG above.
+    # Don't add a pipe-pane: it would write the same bytes a second time and
+    # (because of buffering) scramble the tail the app reads.
     # wake-unlock monitor when session dies
     (while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do sleep 30; done
      command -v termux-wake-unlock >/dev/null 2>&1 && termux-wake-unlock >/dev/null 2>&1 || true) >/dev/null 2>&1 &
@@ -586,6 +602,14 @@ cmd_send() {
 cmd_backup() {
     local TS; TS=$(date +"%Y%m%d_%H%M%S")
     mkdir -p "$BACKUP_DIR"
+    # Flush world state to disk first so the archive captures consistent data.
+    # mc-server has no RCON plumbing for `save-all`; we send through tmux only
+    # when the server is actually running, and only if it's an MC-style server
+    # (Fabric/Forge/NeoForge all support the console command).
+    if server_running 2>/dev/null; then
+        tmux send-keys -t "$TMUX_SESSION" "save-all flush" Enter 2>/dev/null || true
+        sleep 2
+    fi
     log "INF" "backup: creating"
     tar -czf "$BACKUP_DIR/server_$TS.tar.gz" --exclude='logs' --exclude='crash-reports' -C "$SERVER_DIR" . 2>>"$INSTALL_LOG"
     local C; C=$(ls "$BACKUP_DIR"/*.tar.gz 2>/dev/null | wc -l)
@@ -606,7 +630,9 @@ cmd_mod_install() {
     mkdir -p "$DEST"
     # validate jar magic bytes
     if [ "$(head -c 2 "$SRC")" != "PK" ]; then
-        state_set_error "mod-install: not a valid jar"; rm -f "$SRC"; exit 1
+        # Preserve the file so the user can inspect it; rename rather than delete.
+        mv "$SRC" "${SRC}.invalid" 2>/dev/null
+        state_set_error "mod-install: no es un jar válido (renombrado a .invalid)"; exit 1
     fi
     mv "$SRC" "$DEST/$(basename "$SRC")"
     write_state ".last_action = \"mod-install\" .last_error = null"
@@ -642,6 +668,11 @@ cmd_prop() {
             printf '%s=%s\n' "$K" "$V" >> "$F"
         fi
         log "OK" "prop: $K=$V"
+        # Mirror key knobs into state.json so the app shows the live value.
+        # Add more mappings here as the UI starts to read them.
+        if [ "$K" = "server-port" ]; then
+            write_state ".port = ${V%% *}"
+        fi
     done
     write_state '.last_action = "prop" .last_error = null'
 }

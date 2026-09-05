@@ -279,10 +279,22 @@ object Embed {
     fun installScript(ctx: Context) {
         val target = script(ctx)
         target.parentFile?.mkdirs()
+        // Atomic-ish copy: write to a sibling tmp + rename. Prevents KeepAlive's
+        // `status` (every 12s) and ServerService's tail of in-flight commands
+        // from reading a half-written bash script mid-truncate.
+        val tmp = File(target.parentFile, target.name + ".tmp")
         ctx.resources.openRawResource(R.raw.mc_manager).use { input ->
-            target.outputStream().use { input.copyTo(it) }
+            tmp.outputStream().use { input.copyTo(it) }
         }
-        target.setExecutable(true, false)
+        tmp.setExecutable(true, false)
+        if (!tmp.renameTo(target)) {
+            // Cross-FS or already-gone case: fall back to direct write.
+            ctx.resources.openRawResource(R.raw.mc_manager).use { input ->
+                target.outputStream().use { input.copyTo(it) }
+            }
+            target.setExecutable(true, false)
+        }
+        tmp.delete()
         File(prefix(ctx), "tmp").mkdirs()
     }
 

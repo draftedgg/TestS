@@ -27,9 +27,12 @@ object Apis {
         } finally { c.disconnect() }
     }
 
-    /** Streamed download with 3 retries + jar magic-byte validation. Returns true on success. */
+    /** Streamed download with 3 retries + jar magic-byte validation. Returns true on success.
+     *  Writes to `dest.part` first; only renames to `dest` when the stream finished and the
+     *  bytes look like a jar. A killed downloader cannot leave a half-written `dest`. */
     fun downloadToFile(url: String, dest: File): Boolean {
         dest.parentFile?.mkdirs()
+        val part = File(dest.parentFile, dest.name + ".part")
         for (attempt in 1..3) {
             try {
                 val c = URL(url).openConnection() as HttpURLConnection
@@ -38,11 +41,22 @@ object Apis {
                 c.setRequestProperty("User-Agent", "MCPanel/0.1")
                 try {
                     if (c.responseCode !in 200..299) throw java.io.IOException("HTTP ${c.responseCode}")
-                    dest.outputStream().use { out -> c.inputStream.use { it.copyTo(out, 65536) } }
+                    part.outputStream().use { out -> c.inputStream.use { it.copyTo(out, 65536) } }
                 } finally { c.disconnect() }
-                if (dest.length() > 0 && isJar(dest)) return true
-            } catch (_: Exception) { dest.delete() }
+                if (part.length() > 0 && isJar(part)) {
+                    // Atomic-ish: replace dest if present, then move. renameTo is atomic on the same FS.
+                    dest.delete()
+                    if (part.renameTo(dest)) return true
+                    // Cross-FS fallback (shouldn't happen, /sdcard is FUSE-mounted from the app)
+                    part.inputStream().use { it.copyTo(dest.outputStream()) }
+                    part.delete()
+                    if (dest.length() > 0 && isJar(dest)) return true
+                }
+            } catch (_: Exception) {
+                part.delete()
+            }
         }
+        part.delete()
         return dest.exists() && dest.length() > 0 && isJar(dest)
     }
 
