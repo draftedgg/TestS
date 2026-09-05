@@ -25,17 +25,28 @@ object Embed {
     const val PREFIX_PATH = "/data/data/io.mcpanel/files/usr"
     const val HOME_PATH = "/data/data/io.mcpanel/files/home"
 
-    /** Pick the bootstrap matching the device. 32-bit-only devices are the
-     *  common case where an aarch64 bootstrap silently fails to exec. */
-    fun bootstrapAsset(): String {
-        for (abi in android.os.Build.SUPPORTED_ABIS) {
-            when (abi) {
-                "arm64-v8a" -> return BOOTSTRAP_AARCH64
-                "armeabi-v7a", "armeabi", "armv8l" -> return BOOTSTRAP_ARM
-            }
+    /** Pick the bootstrap shipped in THIS apk. Per-ABI builds (armv7/armv8
+     *  flavors) bundle only the matching zip; prefer the device ABI but fall
+     *  back to whichever zip is actually present so extraction never fails
+     *  on a mismatched install (the native ABI stub already prevents most of
+     *  those, but a 64-bit device can still run the armv7 apk in 32-bit). */
+    fun bootstrapAsset(ctx: Context): String {
+        val abis = android.os.Build.SUPPORTED_ABIS
+        val preferred = when {
+            abis.any { it == "arm64-v8a" } -> BOOTSTRAP_AARCH64
+            abis.any { it == "armeabi-v7a" || it == "armeabi" || it == "armv8l" } -> BOOTSTRAP_ARM
+            else -> BOOTSTRAP_AARCH64
         }
-        return BOOTSTRAP_AARCH64
+        return when {
+            assetExists(ctx, preferred) -> preferred
+            assetExists(ctx, BOOTSTRAP_ARM) -> BOOTSTRAP_ARM
+            assetExists(ctx, BOOTSTRAP_AARCH64) -> BOOTSTRAP_AARCH64
+            else -> preferred
+        }
     }
+
+    private fun assetExists(ctx: Context, asset: String): Boolean =
+        try { ctx.assets.open(asset).close(); true } catch (_: Exception) { false }
 
     fun deviceAbi(): String =
         android.os.Build.SUPPORTED_ABIS.joinToString(" ")

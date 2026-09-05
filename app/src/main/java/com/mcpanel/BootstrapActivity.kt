@@ -83,7 +83,7 @@ class BootstrapActivity : Activity() {
         scope.launch {
             val outcome = withContext(Dispatchers.IO) {
                 // Primary attempt: bootstrap matching SUPPORTED_ABIS.
-                var asset = Embed.bootstrapAsset()
+                var asset = Embed.bootstrapAsset(this@BootstrapActivity)
                 var ok = try {
                     assets.open(asset).use { input ->
                         Embed.installBootstrap(this@BootstrapActivity, input, { c -> if (c > 0) ui { bar.isIndeterminate = false; status.text = "Extrayendo… $c archivos" } }, marker(asset))
