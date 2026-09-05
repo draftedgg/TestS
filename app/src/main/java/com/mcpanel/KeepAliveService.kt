@@ -99,7 +99,7 @@ class KeepAliveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("MCPanel")
-            .setContentText("Servidor encendido · toca para abrir")
+            .setContentText("Servidor encendido. Toca para abrir.")
             .setOngoing(true)
             .setSilent(true)
             .setContentIntent(pi)

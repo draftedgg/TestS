@@ -10,6 +10,7 @@
 #   install --loader paper|fabric|forge|neoforge --version X.Y.Z [--ram-min A --ram-max B]
 #   start | stop | restart | status | send <cmd> | backup
 #   mod-install <file-in-inbox> | mod-remove <name>
+#   prop <key> <value> [key value ...] | ram-set <min> <max>
 #   playit-start | playit-stop | playit-status
 #   server-delete
 # ══════════════════════════════════════════════════════════════════════
@@ -190,6 +191,33 @@ log() {  # level msg
 }
 now_ms() { date +%s%3N 2>/dev/null || echo "$(date +%s)000"; }
 
+# ─── installs with per-package progress ──────────────────────────────
+# Streams pkg output into install.log and appends "[PROG] done total"
+# markers as apt configures each package, so the app can render a real
+# progress bar (openjdk and friends pull dozens of dependencies). If the
+# total cannot be simulated (e.g. stale lists) total is 0 and the app
+# falls back to an indeterminate bar.
+apt_progress() {  # $@ = packages
+    local total done rc
+    total=$(apt-get install --simulate -y "$@" 2>/dev/null | grep -c '^Inst ')
+    done=0
+    local MARK="$SHARED/.apt-progress.$$"
+    : > "$MARK"
+    pkg install -y "$@" 2>&1 | while IFS= read -r line; do
+        echo "$line" >> "$INSTALL_LOG"
+        case "$line" in
+            *"Setting up "*)
+                done=$(cat "$MARK" 2>/dev/null); done=$((done + 1))
+                echo "$done" > "$MARK"
+                echo "[PROG] $done $total" >> "$INSTALL_LOG"
+                ;;
+        esac
+    done
+    rc=${PIPESTATUS[0]}
+    rm -f "$MARK"
+    return "$rc"
+}
+
 # ─── state.json: exact schema, atomic write ──────────────────────────
 state_field() { # $1=jq filter on existing state; echoes value or "null"
     if [ -f "$STATE_FILE" ]; then
@@ -267,9 +295,9 @@ cmd_bootstrap() {
     write_state '.last_action = "bootstrap"'
     # jq first: every later step depends on it
     if ! command -v jq >/dev/null 2>&1; then
-        pkg install -y jq >> "$INSTALL_LOG" 2>&1
+        apt_progress jq || true
     fi
-    pkg install -y wget curl tmux jq unzip procps findutils diffutils termux-tools >> "$INSTALL_LOG" 2>&1
+    apt_progress wget curl tmux jq unzip procps findutils diffutils termux-tools || true
     # verify base tools; report exactly which one is missing
     local MISSING=""
     for tool in jq wget curl tmux unzip pgrep find diff bash; do
@@ -327,7 +355,7 @@ cmd_install() {
     fi
     log "INF" "install: java $JPKG"
     apt-get clean >> "$INSTALL_LOG" 2>&1 || true   # free cache: openjdk chain is huge
-    pkg install -y "$JPKG" >> "$INSTALL_LOG" 2>&1
+    apt_progress "$JPKG"
     local PKG_RC=$?
     if [ "$PKG_RC" -ne 0 ]; then
         log "ERR" "install: pkg terminó con código $PKG_RC — detalle en install.log y $PREFIX/var/log/mc-dpkg-shim.log"
@@ -596,6 +624,40 @@ cmd_mod_remove() {
     log "OK" "mod-remove: $NAME"
 }
 
+# Edit server.properties:  prop <key> <value> [<key> <value> ...]
+cmd_prop() {
+    [ $# -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] || { state_set_error "prop: esperaba clave valor [clave valor…]"; exit 1; }
+    [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+    [ -d "$SERVER_DIR" ] || { state_set_error "prop: aún no hay servidor instalado"; exit 1; }
+    local F="$SERVER_DIR/server.properties"
+    [ -f "$F" ] || touch "$F"
+    while [ $# -gt 0 ]; do
+        local K="$1" V="$2"; shift 2
+        case "$K" in *[!A-Za-z0-9_.-]*) state_set_error "prop: clave inválida: $K"; exit 1 ;; esac
+        V=${V//&/\&}   # escape & and | for sed's replacement side
+        V=${V//|/\|}
+        if grep -qE "^[# ]*${K}=" "$F"; then
+            sed -i "s|^[# ]*${K}=.*|${K}=${V}|" "$F"
+        else
+            printf '%s=%s\n' "$K" "$V" >> "$F"
+        fi
+        log "OK" "prop: $K=$V"
+    done
+    write_state '.last_action = "prop" .last_error = null'
+}
+
+# Change how much RAM the server may use (applies on next start):
+#   ram-set <min> <max>   (e.g. ram-set 512M 2G)
+cmd_ram_set() {
+    local MIN="${1:-}" MAX="${2:-}" v
+    [ -n "$MIN" ] && [ -n "$MAX" ] || { state_set_error "ram-set: mínimo y máximo requeridos"; exit 1; }
+    for v in "$MIN" "$MAX"; do
+        case "$v" in [0-9]*[MG]) ;; *) state_set_error "ram-set: formato inválido (ej. 512M o 1G)"; exit 1 ;; esac
+    done
+    write_state ".ram_min = \"$MIN\" .ram_max = \"$MAX\" .last_action = \"ram-set\" .last_error = null"
+    log "OK" "ram-set: $MIN/$MAX (aplica en el próximo arranque)"
+}
+
 # Detect the claim URL / public address from the agent log so the app can
 # show the user what to do (open claim link, then copy the address).
 playit_digest() {
@@ -625,14 +687,35 @@ playit_digest() {
 }
 
 cmd_playit_start() {
+    # auto-install the agent if it is missing (first run may have had no net)
+    if ! command -v playit >/dev/null 2>&1 && ! command -v playitd >/dev/null 2>&1; then
+        log "INF" "playit-start: agente no instalado, instalando…"
+        pkg install -y tur-repo >> "$INSTALL_LOG" 2>&1 || true
+        pkg update -y >> "$INSTALL_LOG" 2>&1 || true
+        pkg install -y playit >> "$INSTALL_LOG" 2>&1 || log "ERR" "playit-start: la instalación del agente falló"
+    fi
     command -v playit  >/dev/null 2>&1 && PLAYIT_BIN="playit"
     command -v playitd >/dev/null 2>&1 && PLAYIT_BIN="playitd"
-    [ -z "$PLAYIT_BIN" ] && { state_set_error "playit-start: not installed"; exit 1; }
+    if [ -z "$PLAYIT_BIN" ]; then
+        state_set_error "No se pudo iniciar playit: el agente no se instaló (revisa la conexión e inténtalo otra vez)"
+        exit 1
+    fi
     tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
     : > "$TUNNEL_LOG" 2>/dev/null || true
     tmux new-session -d -s "$PLAYIT_SESSION" "$PLAYIT_BIN >> '$TUNNEL_LOG' 2>&1"
-    sleep 2
-    playit_digest
+    # wait until the agent prints its claim link / public address (or dies)
+    local i=0 A
+    while [ $i -lt 30 ]; do
+        sleep 1; i=$((i + 1))
+        if ! tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then
+            playit_digest
+            state_set_error "playit se cerró solo al arrancar (revisa la conexión y reintenta)"
+            exit 1
+        fi
+        playit_digest
+        A=$(state_field .playit.address)
+        [ "$A" != "null" ] && [ -n "$A" ] && break
+    done
     write_state '.last_action = "playit-start" .last_error = null'
     log "OK" "playit-start: session up"
 }
@@ -671,6 +754,8 @@ case "$CMD" in
     backup)         cmd_backup "$@" ;;
     mod-install)    cmd_mod_install "$@" ;;
     mod-remove)     cmd_mod_remove "$@" ;;
+    prop)           cmd_prop "$@" ;;
+    ram-set)        cmd_ram_set "$@" ;;
     playit-start)   cmd_playit_start "$@" ;;
     playit-stop)    cmd_playit_stop "$@" ;;
     playit-status)  cmd_playit_status "$@" ;;

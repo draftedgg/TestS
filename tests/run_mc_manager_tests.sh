@@ -101,6 +101,22 @@ run frobnicate
 echo "$(jq -r '.last_error' "$STATE")" | grep -q 'unknown command' && PASS "unknown command rejects" || FAIL "unknown command"
 [ "$(find "$MC_SHARED" -name '.state.json.tmp' | wc -l)" -eq 0 ] && PASS "atomic temp cleaned" || FAIL "atomic temp remains"
 
+# ─── server.properties editing (prop) ────────────────────────────────
+run prop solo-clave
+echo "$(jq -r '.last_error' "$STATE")" | grep -q 'clave valor' && PASS "prop odd args rejects" || FAIL "prop odd args"
+run prop gamemode creative max-players 25 view-distance 8
+PROPS="$MC_HOME/mcserver/server.properties"
+grep -q '^gamemode=creative$' "$PROPS" && PASS "prop set existing key" || FAIL "prop set existing"
+grep -q '^max-players=25$' "$PROPS" && PASS "prop append new key" || FAIL "prop append"
+grep -q '^view-distance=8$' "$PROPS" && PASS "prop multiple pairs" || FAIL "prop pairs"
+run prop motd "Hola & amigos"
+grep -q '^motd=Hola & amigos$' "$PROPS" && PASS "prop value with ampersand" || FAIL "prop ampersand"
+run ram-set 1G 3G
+[ "$(jq -r '.ram_min' "$STATE")" = 1G ] && PASS "ram-set min" || FAIL "ram-set min"
+[ "$(jq -r '.ram_max' "$STATE")" = 3G ] && PASS "ram-set max" || FAIL "ram-set max"
+run ram-set banana x
+[ "$(jq -r '.last_action' "$STATE")" = error ] && echo "$(jq -r '.last_error' "$STATE")" | grep -q 'formato' && PASS "ram-set invalid rejects" || FAIL "ram-set invalid"
+
 # ─── playit: claim + address detection from tunnel.log ───────────────
 touch "$MC_TMUX_MARKER"   # playit session up (stub shares the marker)
 printf 'Visit https://playit.gg/claim/abc123 to claim this agent\n' > "$MC_SHARED/tunnel.log"

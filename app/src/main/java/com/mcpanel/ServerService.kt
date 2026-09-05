@@ -76,7 +76,8 @@ class ServerService : Service() {
 
     /** After any command, mirror reality into the keep-alive service: while
      *  the server or the tunnel is up we hold a wakelock + notification;
-     *  when both are down we release everything. */
+     *  when both are down we release everything. Honours the user's
+     *  "Mantener activo" switch in Ajustes. */
     private fun syncKeepAlive() {
         try {
             val f = File(Embed.sharedDir(this), "state.json")
@@ -85,7 +86,8 @@ class ServerService : Service() {
                 val o = org.json.JSONObject(f.readText())
                 up = o.optBoolean("running") || (o.optJSONObject("playit")?.optBoolean("running") == true)
             }
-            if (up) KeepAliveService.want(this) else KeepAliveService.cancel(this)
+            val keep = getSharedPreferences("mcpanel", MODE_PRIVATE).getBoolean("keep_awake", true)
+            if (up && keep) KeepAliveService.want(this) else KeepAliveService.cancel(this)
         } catch (_: Exception) { }
     }
 

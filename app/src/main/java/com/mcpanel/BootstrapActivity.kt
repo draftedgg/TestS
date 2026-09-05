@@ -49,11 +49,13 @@ class BootstrapActivity : Activity() {
 
     private fun buildUi() {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BLACK); setPadding(48, 96, 48, 32) }
-        fun tv(t: String, size: Int, c: Int): TextView = TextView(this).apply { text = t; textSize = size.toFloat(); setTextColor(c); setPadding(0, 8, 0, 8) }
-        col.addView(tv("PREPARANDO ENTORNO", 11, FG))
-        col.addView(tv("El entorno Linux viene incluido en la app. Se extrae una única vez en este dispositivo. No se necesita conexión.", 14, FG))
-        col.addView(tv("Arquitectura: " + Embed.deviceAbi(), 12, MUTED))
-        status = tv("Extrayendo…", 13, MUTED); col.addView(status)
+        fun tv(t: String, size: Int, c: Int, bold: Boolean = false): TextView = TextView(this).apply {
+            text = t; textSize = size.toFloat(); setTextColor(c); setPadding(0, 8, 0, 8)
+            if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        col.addView(tv("MCPanel", 30, FG, bold = true))
+        col.addView(tv("Primera vez aquí: preparamos la aplicación.\nNo necesitas hacer nada, tarda un momento y no usa internet.", 14, FG))
+        status = tv("Preparando…", 13, MUTED); col.addView(status)
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true }
         col.addView(bar)
         retry = Button(this).apply {
@@ -69,18 +71,16 @@ class BootstrapActivity : Activity() {
 
     private fun showUnsupported() {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(BLACK); setPadding(48, 96, 48, 32) }
-        val tv = TextView(this).apply {
-            textSize = 14f; setTextColor(ERROR)
-            text = "Este dispositivo (" + Embed.deviceAbi() + ") no tiene una arquitectura ARM compatible con el entorno incluido."
-        }
-        col.addView(tv)
+        fun tv(t: String, size: Int, c: Int): TextView = TextView(this).apply { text = t; textSize = size.toFloat(); setTextColor(c); setPadding(0, 8, 0, 8) }
+        col.addView(tv("Este dispositivo no es compatible con MCPanel todavía.", 14, ERROR))
+        col.addView(tv("Detalle técnico: " + Embed.deviceAbi(), 12, MUTED))
         setContentView(ScrollView(this).apply { addView(col) })
     }
 
     private fun install() {
         retry.visibility = View.GONE
         bar.isIndeterminate = true
-        status.text = "Extrayendo…"
+        status.text = "Preparando…"
         status.setTextColor(MUTED)
         scope.launch {
             val outcome = withContext(Dispatchers.IO) {
@@ -88,7 +88,7 @@ class BootstrapActivity : Activity() {
                 var asset = Embed.bootstrapAsset(this@BootstrapActivity)
                 var ok = try {
                     assets.open(asset).use { input ->
-                        Embed.installBootstrap(this@BootstrapActivity, input, { c -> if (c > 0) ui { bar.isIndeterminate = false; status.text = "Extrayendo… $c archivos" } }, marker(asset))
+                        Embed.installBootstrap(this@BootstrapActivity, input, { c -> if (c > 0) ui { bar.isIndeterminate = false; status.text = "Preparando…" } }, marker(asset))
                     }
                 } catch (_: Exception) { false }
                 // If it extracts but cannot exec (wrong arch / interp), try the
@@ -97,16 +97,16 @@ class BootstrapActivity : Activity() {
                     val other = if (asset == Embed.BOOTSTRAP_ARM) Embed.BOOTSTRAP_AARCH64 else Embed.BOOTSTRAP_ARM
                     try {
                         assets.open(other).use { input ->
-                            val ok2 = Embed.installBootstrap(this@BootstrapActivity, input, { c -> if (c > 0) ui { bar.isIndeterminate = false; status.text = "Probando otra arquitectura… $c archivos" } }, marker(other))
+                            val ok2 = Embed.installBootstrap(this@BootstrapActivity, input, { c -> if (c > 0) ui { bar.isIndeterminate = false; status.text = "Preparando…" } }, marker(other))
                             if (ok2) { asset = other; true } else false
                         }
                     } catch (_: Exception) { false }
                 }
                 Triple(ok, asset, Embed.bashDiag(this@BootstrapActivity))
             }
-            if (outcome.first) { toast("Entorno listo."); goMain() }
+            if (outcome.first) { goMain() }
             else {
-                status.text = "Error: " + outcome.third
+                status.text = "Algo no salió bien al preparar la aplicación."
                 status.setTextColor(ERROR)
                 retry.visibility = View.VISIBLE
             }
