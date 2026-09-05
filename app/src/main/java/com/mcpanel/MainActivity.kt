@@ -161,7 +161,7 @@ class MainActivity : Activity() {
     private fun px(dp: Float): Int = (dp * resources.displayMetrics.density).toInt()
 
     private fun rounded(fill: Int, radius: Float, stroke: Int = 0, sw: Int = 1) =
-        GradientDrawable().apply { cornerRadius = px(radius); setColor(fill); if (stroke != 0) setStroke(sw, stroke) }
+        GradientDrawable().apply { cornerRadius = px(radius).toFloat(); setColor(fill); if (stroke != 0) setStroke(sw, stroke) }
 
     private fun dim(c: Int): Int = Color.rgb((Color.red(c) * 0.72f).toInt(), (Color.green(c) * 0.72f).toInt(), (Color.blue(c) * 0.72f).toInt())
 
@@ -519,7 +519,7 @@ class MainActivity : Activity() {
     }
 
     /** Vigila running/playit/errores y re-renderiza sólo al cambiar. */
-    private suspend fun watchHome(pillTv: TextView) {
+    private suspend fun CoroutineScope.watchHome(pillTv: TextView) {
         fun curSig(): String {
             val st = readState()
             val r = st?.optBoolean("running") == true
@@ -548,7 +548,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(BG); setPadding(px(16f), px(8f), px(16f), px(6f))
         }
         val st = readState()
-        val running = st?.optBoolean("running") == true
+        var running = st?.optBoolean("running") == true
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         head.addView(tv("Consola", 21f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
         val pillTv = pill(if (running) "● EN VIVO" else "○ APAGADO", if (running) OK_BG else OFF_BG, if (running) ACCENT else MUTED)
@@ -619,6 +619,15 @@ class MainActivity : Activity() {
         pollJob?.cancel()
         pollJob = scope.launch {
             while (isActive) {
+                // estado en vivo: actualiza la pastilla sin re-crear la pantalla
+                val stNow = readState()
+                val rNow = stNow?.optBoolean("running") == true
+                if (rNow != running) {
+                    running = rNow
+                    pillTv.text = if (rNow) "● EN VIVO" else "○ APAGADO"
+                    pillTv.setTextColor(if (rNow) ACCENT else MUTED)
+                    pillTv.background = rounded(if (rNow) OK_BG else OFF_BG, 100f)
+                }
                 val change = withContext(Dispatchers.IO) {
                     try {
                         val len = consoleLog.length()
@@ -665,7 +674,7 @@ class MainActivity : Activity() {
         col.addHeader(if (isPlugin) "Plugins" else "Mods",
             "Se instalan al instante y sin tocar nada más.")
         if (mcVersion.isEmpty()) {
-            col.addView(tv("Instala un servidor primero.", MUTED))
+            col.addView(tv("Instala un servidor primero.", color = MUTED))
             return sv().apply { addView(col) }
         }
 
@@ -690,7 +699,7 @@ class MainActivity : Activity() {
                     val hits = withContext(Dispatchers.IO) { Apis.modrinthSearch(q, mcVersion, loader) }
                     results.removeAllViews()
                     if (hits.isEmpty()) {
-                        results.addView(tv("Sin resultados compatibles con $mcVersion.", MUTED))
+                        results.addView(tv("Sin resultados compatibles con $mcVersion.", color = MUTED))
                         return@launch
                     }
                     hits.forEach { h ->
@@ -735,7 +744,7 @@ class MainActivity : Activity() {
             val dest = if (isPlugin) File(Embed.serverDir(this@MainActivity), "plugins") else File(Embed.serverDir(this@MainActivity), "mods")
             val files = if (dest.exists()) dest.listFiles()?.sortedBy { it.name } else null
             if (files.isNullOrEmpty()) {
-                addView(tv("Nada por aquí todavía. Busca arriba y añade el primero.", MUTED))
+                addView(tv("Nada por aquí todavía. Busca arriba y añade el primero.", color = MUTED))
             } else {
                 files.forEach { f ->
                     val row = LinearLayout(this@MainActivity).apply {
@@ -889,7 +898,7 @@ class MainActivity : Activity() {
                 toast("Respaldo en proceso…")
                 scope.launch { delay(5000); if (tab == Tab.SETTINGS) render() }
             }
-            val backups = File(Embed.home(this), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyArray()
+            val backups = File(Embed.home(this@MainActivity), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyArray()
             if (backups.isEmpty()) {
                 addView(tv("(todavía no hay respaldos)", 12.5f, FAINT), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
             } else {
@@ -993,7 +1002,7 @@ class MainActivity : Activity() {
             if (installing) {
                 addView(tv("Instalando herramientas… puede tardar unos minutos en la primera vez.", 12.5f, ACCENT),
                     LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                 row.addView(spinner(), LinearLayout.LayoutParams(px(22f), px(22f)))
                 row.addView(tv("Descargando paquetes…", 12.5f, MUTED), LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
                 addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
@@ -1079,7 +1088,7 @@ class MainActivity : Activity() {
             }.filter { mcAtLeast(it, "1.17") }.take(60)
             list.removeAllViews()
             if (versions.isEmpty()) {
-                list.addView(tv("Sin conexión ahora mismo. Escribe la versión manualmente.", WARN))
+                list.addView(tv("Sin conexión ahora mismo. Escribe la versión manualmente.", color = WARN))
                 return@launch
             }
             versions.forEachIndexed { i, v ->
@@ -1188,10 +1197,11 @@ class MainActivity : Activity() {
             addView(tv("Mientras se instala, tu teléfono puede calentarse un poco. Es normal: está trabajando a fondo.", 12.5f, MUTED),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
         }
-        val toggleBtn = col.addBtn("VER DETALLES TÉCNICOS", Style.GHOST, height = 42f, marginTop = 12f) {
+        var toggleBtn: Button? = null
+        toggleBtn = col.addBtn("VER DETALLES TÉCNICOS", Style.GHOST, height = 42f, marginTop = 12f) {
             showDetails[0] = !showDetails[0]
             detailsWrap.visibility = if (showDetails[0]) View.VISIBLE else View.GONE
-            toggleBtn.text = if (showDetails[0]) "OCULTAR DETALLES TÉCNICOS" else "VER DETALLES TÉCNICOS"
+            toggleBtn?.text = if (showDetails[0]) "OCULTAR DETALLES TÉCNICOS" else "VER DETALLES TÉCNICOS"
         }
         detailsWrap.visibility = View.GONE
         col.addView(detailsWrap, LinearLayout.LayoutParams(-1, px(240f)).apply { topMargin = px(8f) })
