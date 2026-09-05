@@ -54,7 +54,7 @@ class BootstrapActivity : Activity() {
             if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
         }
         col.addView(tv("MCPanel", 30, FG, bold = true))
-        col.addView(tv("Primera vez aquí: preparamos la aplicación.\nNo necesitas hacer nada, tarda un momento y no usa internet.", 14, FG))
+        col.addView(tv("Preparando la aplicación.", 14, FG))
         status = tv("Preparando…", 13, MUTED); col.addView(status)
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true }
         col.addView(bar)
@@ -106,7 +106,7 @@ class BootstrapActivity : Activity() {
             }
             if (outcome.first) { goMain() }
             else {
-                status.text = "Algo no salió bien al preparar la aplicación."
+                status.text = "Error al preparar la aplicación."
                 status.setTextColor(ERROR)
                 retry.visibility = View.VISIBLE
             }

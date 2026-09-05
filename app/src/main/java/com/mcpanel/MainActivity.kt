@@ -47,9 +47,8 @@ import java.io.RandomAccessFile
  * MCPanel: controla tu servidor de Minecraft desde el móvil.
  *
  * Diseño propio (sin Material You): tema oscuro, navegación inferior con
- * 5 secciones, tarjetas con esquinas suaves y estados siempre visibles.
- * El usuario nunca necesita ver la terminal: los detalles técnicos quedan
- * ocultos detrás de un acordeón "Ver detalles".
+ * 4 secciones. Inicio es el detalle del servidor (control + dirección);
+ * la terminal queda en Consola.
  */
 class MainActivity : Activity() {
 
@@ -87,7 +86,7 @@ class MainActivity : Activity() {
     // ── estado de la UI ──────────────────────────────────────────────
     private enum class Tab(val id: String, val label: String) {
         HOME("home", "Inicio"), CONSOLE("console", "Consola"), MODS("mods", "Mods"),
-        CONNECT("connect", "Conectar"), SETTINGS("settings", "Ajustes")
+        SETTINGS("settings", "Ajustes")
     }
     private var tab: Tab = Tab.HOME
     private var actionBusy = false                       // transición INICIAR/DETENER en curso
@@ -116,7 +115,7 @@ class MainActivity : Activity() {
     private val OFF_BG = Color.rgb(30, 32, 36)
     private val RADIUS = 16f
 
-    private enum class Style { PRIMARY, SECONDARY, DANGER, GHOST, PLAIN }
+    private enum class Style { PRIMARY, SECONDARY, DANGER, DANGER_TEXT, GHOST, PLAIN }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -169,7 +168,6 @@ class MainActivity : Activity() {
         Tab.HOME -> homeBody(st)
         Tab.CONSOLE -> consoleBody()
         Tab.MODS -> modsBody(st)
-        Tab.CONNECT -> connectBody(st)
         Tab.SETTINGS -> settingsBody(st)
     }
 
@@ -201,6 +199,7 @@ class MainActivity : Activity() {
         Style.PRIMARY -> Triple(ACCENT, Color.BLACK, 0)
         Style.SECONDARY -> Triple(CARD, TEXT, STROKE)
         Style.DANGER -> Triple(DANGER_DK, DANGER, 0)
+        Style.DANGER_TEXT -> Triple(Color.TRANSPARENT, DANGER, 0)
         Style.GHOST -> Triple(Color.TRANSPARENT, MUTED, STROKE)
         Style.PLAIN -> Triple(Color.TRANSPARENT, ACCENT, 0)
     }
@@ -401,6 +400,20 @@ class MainActivity : Activity() {
         "paper" -> "Paper"; "fabric" -> "Fabric"; "forge" -> "Forge"; "neoforge" -> "NeoForge"; else -> if (l.isEmpty()) "Servidor" else l
     }
 
+    /** Etiqueta del juego (costura multi-juego: hoy solo Minecraft). */
+    private fun gameLabel(version: String): String = "Minecraft $version"
+
+    /** "2G"→"2GB", "512M"→"512MB". En UI solo se muestra el máximo. */
+    private fun prettyRam(v: String): String {
+        val t = v.trim().uppercase()
+        if (t.isEmpty()) return ""
+        return if (t.endsWith("B")) t else t + "B"
+    }
+
+    /** Puerto desde el estado (costura multi-juego: Terraria usará 7777). */
+    private fun serverPort(st: JSONObject?): Int =
+        if (st != null && st.has("port")) st.optInt("port", 25565) else 25565
+
     private fun loaderKind(l: String): String = if (l == "paper") "Plugins" else "Mods"
 
     @Suppress("DEPRECATION")
@@ -468,96 +481,107 @@ class MainActivity : Activity() {
     }
 
     // ═══════════════════════════ PÁGINA: INICIO ═════════════════════
+    // Detalle del servidor: control + dirección en un solo sitio, sin tarjetas.
     private fun homeBody(st: JSONObject): View {
         val col = col()
         val running = st.optBoolean("running")
         val loader = prettyLoader(sval(st, "loader"))
         val version = sval(st, "version")
+        val port = serverPort(st)
         val err = sval(st, "last_error")
         val playit = st.optJSONObject("playit")
         val pRunning = playit?.optBoolean("running") == true
         val pAddr = playit?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" }
         val claimed = pAddr != null && !pAddr.startsWith("http")
+        val claimUrl = pAddr?.takeIf { !claimed }
 
+        // ── servidor ──
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         top.addView(tv("MCPanel", 21f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-        val pillTv = pill(if (running) "● Encendido" else "○ Apagado", if (running) OK_BG else OFF_BG, if (running) ACCENT else MUTED)
-        top.addView(pillTv, LinearLayout.LayoutParams(-2, -2))
+        top.addView(tv(if (running) "Encendido" else "Apagado", 12f, if (running) ACCENT else MUTED, bold = true),
+            LinearLayout.LayoutParams(-2, -2))
         col.addView(top)
-
-        col.addCard(marginTop = 14f) {
-            addView(tv(loader, 18f, TEXT, bold = true))
-            addView(tv("Minecraft $version", 12.5f, MUTED),
-                LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(6f) })
-            addView(tv(if (running) "Tu mundo está corriendo ahora mismo." else "Tu mundo está guardado y listo para arrancar.", 13f, MUTED),
-                LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
-            if (err.isNotEmpty()) {
-                addView(tv("⚠  $err", 12.5f, WARN), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
-                addBtn("Ver qué pasó", Style.GHOST, height = 40f, marginTop = 0f) { showLogDialog("Última ejecución", lastRunLog) }
-            }
-            addBtn(if (serverBusy) (busyText ?: "…") else if (running) "Detener servidor" else "Iniciar servidor",
-                if (running) Style.DANGER else Style.PRIMARY,
-                enabled = !serverBusy,
-                marginTop = if (err.isNotEmpty()) 10f else 14f) {
-                toggleServer()
-            }
+        col.addView(tv(loader, 18f, TEXT, bold = true),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(14f) })
+        col.addView(tv(version, 12.5f, MUTED),
+            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(6f) })
+        if (err.isNotEmpty()) {
+            col.addView(tv(err, 12.5f, WARN), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
+            col.addBtn("Ver registro", Style.GHOST, height = 40f, marginTop = 0f) { showLogDialog("Última ejecución", lastRunLog) }
+        }
+        col.addBtn(if (serverBusy) (busyText ?: "…") else if (running) "Detener servidor" else "Iniciar servidor",
+            if (running) Style.DANGER_TEXT else Style.PRIMARY,
+            enabled = !serverBusy,
+            marginTop = 14f) {
+            toggleServer()
         }
 
-        // cómo conectarse
-        col.addCard(marginTop = 12f) {
-            addView(tv("Cómo se conectan tus amigos", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(6f)))
-            if (claimed) {
-                addView(tv("Dirección pública (playit)", 14f, TEXT, bold = true))
-                addView(tv(pAddr!!, 15f, ACCENT, mono = true).apply { setTextIsSelectable(true) },
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(2f) })
-                addView(tv("Compártela con quien quieras que entre a tu mundo.", 12.5f, MUTED))
-                addBtn("Copiar dirección", Style.SECONDARY, height = 44f, marginTop = 10f) { copy(pAddr!!) }
-            } else {
+        // ── dirección (una sola fila: pública, claim, LAN o nada) ──
+        col.addView(tv("Dirección", 11f, FAINT, bold = true, ls = 0.06f),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(22f) })
+        col.addView(View(this), LinearLayout.LayoutParams(-1, px(8f)))
+        when {
+            claimed -> {
+                col.addView(tv(pAddr!!, 18f, ACCENT, bold = true, mono = true).apply { setTextIsSelectable(true) })
+                col.addBtn("Copiar dirección", Style.SECONDARY, height = 44f, marginTop = 10f) { copy(pAddr!!) }
+            }
+            pRunning && claimUrl != null -> {
+                col.addView(tv(claimUrl, 13f, ACCENT, mono = true).apply { setTextIsSelectable(true) },
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
+                col.addBtn("Abrir enlace", Style.SECONDARY, height = 44f, marginTop = 8f) { open(claimUrl) }
+            }
+            pRunning -> {
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                row.addView(spinner(), LinearLayout.LayoutParams(px(20f), px(20f)))
+                row.addView(tv("Conectando…", 13.5f, TEXT, bold = true),
+                    LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
+                col.addView(row)
+                col.addBtn("Abrir playit.gg", Style.GHOST, height = 42f, marginTop = 10f) { open("https://playit.gg/account/tunnels") }
+            }
+            else -> {
                 val lan = lanIp()
                 if (lan != null) {
-                    addView(tv("Misma red Wi-Fi", 14f, TEXT, bold = true))
-                    addView(tv("$lan:25565", 14f, ACCENT, mono = true).apply { setTextIsSelectable(true) },
-                        LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
+                    col.addView(tv("$lan:$port", 16f, ACCENT, bold = true, mono = true).apply { setTextIsSelectable(true) })
+                    col.addView(tv("Solo esta Wi-Fi", 12f, MUTED),
+                        LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
                 }
-                addView(tv("Para que entren desde cualquier lugar activa el túnel gratuito:", 12.5f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
-                addBtn(if (pRunning) "Gestionar túnel" else "Configurar túnel", Style.SECONDARY, height = 44f, marginTop = 2f) { goto(Tab.CONNECT) }
+                col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel", Style.GHOST, height = 44f,
+                    marginTop = 8f, enabled = !tunnelBusy) {
+                    if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
+                    runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },
+                        { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
+                }
+            }
+        }
+        if (pRunning) {
+            col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Detener túnel", Style.DANGER_TEXT, height = 44f,
+                marginTop = 8f, enabled = !tunnelBusy) {
+                if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
+                runWithBusy("tunnel", "Deteniendo túnel…", { runTermux("playit-stop") },
+                    { readState()?.optJSONObject("playit")?.optBoolean("running") != true })
             }
         }
 
-        // datos rápidos
-        col.addCard(marginTop = 12f) {
-            addView(tv("Datos", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-            addInfo("Versión", version)
-            addInfo("RAM asignada", "${sval(st, "ram_min")} – ${sval(st, "ram_max")}")
-            addInfo("Puerto", (if (st.has("port")) st.optInt("port", 25565) else 25565).toString())
-            addInfo("Cargador", loader)
-        }
-
-        if (running) { pollJob?.cancel(); pollJob = scope.launch { watchHome(pillTv) } }
+        pollJob?.cancel()
+        pollJob = scope.launch { watchMerged() }
         return sv().apply { addView(col) }
     }
 
-    /** Vigila running/playit/errores y re-renderiza sólo al cambiar. */
-    private suspend fun CoroutineScope.watchHome(pillTv: TextView) {
+    /** Vigila servidor, túnel, dirección y errores; re-renderiza sólo al cambiar. */
+    private suspend fun CoroutineScope.watchMerged() {
         fun curSig(): String {
             val st = readState()
             val r = st?.optBoolean("running") == true
             val p = st?.optJSONObject("playit")?.optBoolean("running") == true
-            return "$r|$p|${sval(st, "last_error")}|$actionBusy"
+            val a = st?.optJSONObject("playit")?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
+            return "$r|$p|$a|${sval(st, "last_error")}|$actionBusy"
         }
         var last = curSig()
         while (isActive) {
             delay(1500)
+            if (tab != Tab.HOME) break
             val sig = curSig()
             if (sig != last) {
-                last = sig
-                val r = readState()?.optBoolean("running") == true
-                pillTv.text = if (r) "● Encendido" else "○ Apagado"
-                pillTv.setTextColor(if (r) ACCENT else MUTED)
-                pillTv.background = rounded(if (r) OK_BG else OFF_BG, 100f)
                 render()
                 break
             }
@@ -694,8 +718,7 @@ class MainActivity : Activity() {
         val mcVersion = sval(st, "version")
         val isPlugin = loader == "paper"
         val col = col()
-        col.addHeader(if (isPlugin) "Plugins" else "Mods",
-            "Se instalan al instante y sin tocar nada más.")
+        col.addHeader(if (isPlugin) "Plugins" else "Mods")
         if (mcVersion.isEmpty()) {
             col.addView(tv("Instala un servidor primero.", color = MUTED))
             return sv().apply { addView(col) }
@@ -767,7 +790,7 @@ class MainActivity : Activity() {
             val dest = if (isPlugin) File(Embed.serverDir(this@MainActivity), "plugins") else File(Embed.serverDir(this@MainActivity), "mods")
             val files = if (dest.exists()) dest.listFiles()?.sortedBy { it.name } else null
             if (files.isNullOrEmpty()) {
-                addView(tv("Nada por aquí todavía. Busca arriba y añade el primero.", color = MUTED))
+                addView(tv("Sin mods.", color = MUTED))
             } else {
                 files.forEach { f ->
                     val row = LinearLayout(this@MainActivity).apply {
@@ -780,7 +803,7 @@ class MainActivity : Activity() {
                     del.setOnClickListener {
                         AlertDialog.Builder(this@MainActivity)
                             .setTitle("Quitar ${f.name}")
-                            .setMessage("Se eliminará del servidor. Puedes volver a añadirlo cuando quieras.")
+                            .setMessage("Se eliminará del servidor.")
                             .setNegativeButton("Cancelar", null)
                             .setPositiveButton("Quitar") { _, _ ->
                                 try { f.delete() } catch (_: Exception) { }
@@ -795,226 +818,82 @@ class MainActivity : Activity() {
         return sv().apply { addView(col) }
     }
 
-    // ═══════════════════════════ PÁGINA: CONECTAR ═══════════════════
-    private fun connectBody(st: JSONObject): View {
-        val col = col()
-        val playit = st.optJSONObject("playit")
-        val pRunning = playit?.optBoolean("running") == true
-        val pAddr = playit?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" }
-        val pClaimed = pAddr != null && !pAddr.startsWith("http")
-        val claimUrl = pAddr?.takeIf { !pClaimed }
-        val err = sval(st, "last_error")
-
-        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        head.addView(tv("Conectar", 21f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-        val statusTv = when {
-            pRunning && pClaimed -> pill("● Conectado", OK_BG, ACCENT)
-            pRunning -> pill("○ Conectando", OFF_BG, WARN)
-            else -> pill("○ Apagado", OFF_BG, MUTED)
-        }
-        head.addView(statusTv, LinearLayout.LayoutParams(-2, -2))
-        col.addView(head, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
-        col.addView(tv("Comparte tu mundo con amigos desde cualquier lugar, gratis.", 12.5f, MUTED),
-            LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(6f) })
-
-        if (err.isNotEmpty()) {
-            col.addCard {
-                addView(tv("⚠  $err", 12.5f, WARN))
-                addBtn("Reintentar", Style.SECONDARY, height = 40f, marginTop = 8f) {
-                    clearError()
-                    render()
-                    if (!pRunning) {
-                        runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },
-                            { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
-                    }
-                }
-            }
-        }
-
-        when {
-            // estado final: dirección pública para compartir
-            pRunning && pClaimed -> col.addCard(marginTop = 12f) {
-                addView(tv("Dirección para tus amigos", 11f, ACCENT, bold = true, ls = 0.06f))
-                addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-                addView(tv(pAddr!!, 20f, ACCENT, bold = true, mono = true).apply { setTextIsSelectable(true) })
-                addView(tv("La escriben en Multijugador → Añadir servidor.", 12.5f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
-                addBtn("Copiar dirección", Style.PRIMARY, height = 46f, marginTop = 12f) { copy(pAddr!!) }
-                addBtn("Abrir playit.gg", Style.GHOST, height = 42f, marginTop = 6f) { open("https://playit.gg/account/tunnels") }
-            }
-
-            // paso intermedio: hay que vincular el dispositivo en el navegador
-            pRunning && claimUrl != null -> col.addCard(marginTop = 12f) {
-                addView(tv("Falta un paso", 11f, WARN, bold = true, ls = 0.06f))
-                addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(8f)))
-                addView(tv("Abre este enlace y crea tu cuenta gratis (o entra si ya tienes una):", 13.5f, TEXT))
-                addView(tv(claimUrl, 13f, ACCENT, mono = true).apply { setTextIsSelectable(true) },
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f); bottomMargin = px(4f) })
-                addBtn("Abrir enlace", Style.PRIMARY, height = 46f, marginTop = 10f) { open(claimUrl) }
-                addView(tv("Al terminar vuelve aquí: la dirección aparecerá sola.", 12f, FAINT),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
-            }
-
-            // arrancando y aún sin noticias del agente
-            pRunning -> col.addCard(marginTop = 12f) {
-                val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                row.addView(spinner(), LinearLayout.LayoutParams(px(20f), px(20f)))
-                row.addView(tv("Conectando con playit…", 13.5f, TEXT, bold = true),
-                    LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
-                addView(row)
-                addView(tv("Puede tardar unos segundos. Si no aparece nada, abre playit.gg y revisa tus túneles.", 12.5f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
-                addBtn("Abrir playit.gg", Style.GHOST, height = 42f, marginTop = 10f) { open("https://playit.gg/account/tunnels") }
-            }
-
-            // apagado: guía + botón principal
-            else -> col.addCard(marginTop = 12f) {
-                addView(tv("Cómo funciona", 11f, FAINT, bold = true, ls = 0.06f))
-                addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-                listOf(
-                    "Toca Iniciar túnel.",
-                    "Crea tu cuenta gratis en playit.gg la primera vez.",
-                    "Vuelve aquí: tu dirección aparecerá lista para compartir."
-                ).forEach { s ->
-                    addView(tv(s, 13.5f, MUTED), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(6f) })
-                }
-                addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel", Style.PRIMARY, marginTop = 12f,
-                    enabled = !tunnelBusy) {
-                    if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
-                    runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },
-                        { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
-                }
-            }
-        }
-
-        if (pRunning) {
-            col.addBtn("Detener túnel", Style.DANGER, height = 46f, marginTop = 14f, enabled = !tunnelBusy) {
-                if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
-                runWithBusy("tunnel", "Deteniendo túnel…", { runTermux("playit-stop") },
-                    { readState()?.optJSONObject("playit")?.optBoolean("running") != true })
-            }
-        }
-
-        // vigila playit y re-renderiza cuando cambia el estado o la dirección
-        pollJob?.cancel()
-        var lastSig = "$pRunning|${pAddr ?: ""}|$err"
-        pollJob = scope.launch {
-            while (isActive) {
-                delay(1300)
-                val st2 = readState() ?: continue
-                val run = st2.optJSONObject("playit")?.optBoolean("running") == true
-                val addr = st2.optJSONObject("playit")?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" }
-                val sig = "$run|${addr ?: ""}|${sval(st2, "last_error")}"
-                if (sig != lastSig) {
-                    lastSig = sig
-                    if (tab == Tab.CONNECT) { render(); break }
-                }
-            }
-        }
-        return sv().apply { addView(col) }
-    }
-
     // ═══════════════════════════ PÁGINA: AJUSTES ════════════════════
     private fun settingsBody(st: JSONObject): View {
         val col = col()
-        col.addHeader("Ajustes", "Configura tu servidor a tu gusto.")
+        col.addHeader("Ajustes")
         val running = st.optBoolean("running")
 
-        // ── encendido en segundo plano (wakelock, como Termux) ────────
-        col.addCard {
-            addView(tv("Ejecución", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-            val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val colLbl = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-            colLbl.addView(tv("Mantener activo", 15f, TEXT, bold = true))
-            colLbl.addView(tv("Con la pantalla apagada, el servidor sigue corriendo.", 12f, MUTED))
-            row.addView(colLbl, LinearLayout.LayoutParams(0, -2, 1f))
-            val sw = Switch(this@MainActivity).apply { isChecked = keepAwakePref() }
-            sw.setOnCheckedChangeListener { _, on ->
-                prefs.edit().putBoolean("keep_awake", on).apply()
-                if (on) KeepAliveService.want(this@MainActivity)
-                else KeepAliveService.cancel(this@MainActivity)
-            }
-            row.addView(sw, LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
-            addView(row)
+        fun section(title: String) {
+            col.addView(tv(title, 11f, FAINT, bold = true, ls = 0.06f),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(20f) })
+            col.addView(View(this), LinearLayout.LayoutParams(-1, px(8f)))
         }
+
+        // ── ejecución en segundo plano ──
+        section("Ejecución")
+        val keepRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val keepLbl = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        keepLbl.addView(tv("Mantener activo", 15f, TEXT, bold = true))
+        keepRow.addView(keepLbl, LinearLayout.LayoutParams(0, -2, 1f))
+        val sw = Switch(this).apply { isChecked = keepAwakePref() }
+        sw.setOnCheckedChangeListener { _, on ->
+            prefs.edit().putBoolean("keep_awake", on).apply()
+            if (on) KeepAliveService.want(this)
+            else KeepAliveService.cancel(this)
+        }
+        keepRow.addView(sw, LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
+        col.addView(keepRow)
         if (!isBatteryIgnored()) {
-            col.addCard(marginTop = 10f) {
-                addView(tv("⚠  Optimización de batería activa", 12.5f, WARN))
-                addView(tv("Android puede dormir la app en segundo plano y cortar el servidor. Permite la excepción para evitarlo.", 12f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
-                addBtn("Permitir ejecución en segundo plano", Style.SECONDARY, height = 44f, marginTop = 8f) { requestIgnoreBattery() }
+            col.addView(tv("Optimización de batería activa", 12.5f, WARN),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+            col.addBtn("Permitir segundo plano", Style.SECONDARY, height = 44f, marginTop = 8f) { requestIgnoreBattery() }
+        }
+
+        // ── memoria ──
+        section("Memoria")
+        val ramRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        ramRow.addView(tv("RAM del servidor", 15f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
+        ramRow.addView(tv(prettyRam(sval(st, "ram_max")), 14f, ACCENT, bold = true, mono = true),
+            LinearLayout.LayoutParams(-2, -2))
+        col.addView(ramRow)
+        if (running) col.addView(tv("Aplica al reiniciar.", 11.5f, FAINT),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
+        col.addBtn("Cambiar RAM", Style.SECONDARY, height = 44f, marginTop = 8f) { openRamDialog(st) }
+
+        // ── propiedades ──
+        section("Propiedades")
+        col.addBtn("Editar propiedades", Style.SECONDARY, height = 44f, marginTop = 2f) { openPropsDialog() }
+
+        // ── respaldos ──
+        section("Respaldos")
+        col.addBtn("Crear respaldo", Style.SECONDARY, height = 44f, marginTop = 2f) {
+            runTermux("backup")
+            toast("Respaldo en proceso…")
+            scope.launch { delay(5000); if (tab == Tab.SETTINGS) render() }
+        }
+        val backups = File(Embed.home(this), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+        if (backups.isEmpty()) {
+            col.addView(tv("Sin respaldos.", 12.5f, FAINT), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+        } else {
+            backups.take(5).forEach { f ->
+                val kb = f.length() / 1024
+                col.addView(tv(f.name, 13f, TEXT, bold = true, mono = true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+                col.addView(tv("$kb KB", 11f, FAINT), LinearLayout.LayoutParams(-1, -2))
             }
         }
 
-        // ── memoria del servidor ──────────────────────────────────────
-        col.addCard(marginTop = 12f) {
-            addView(tv("Memoria (RAM)", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-            val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val colLbl = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
-            colLbl.addView(tv("RAM para el servidor", 15f, TEXT, bold = true))
-            colLbl.addView(tv("La usa mientras está encendido. Sube el máximo si va lento.", 12f, MUTED))
-            row.addView(colLbl, LinearLayout.LayoutParams(0, -2, 1f))
-            row.addView(tv("${sval(st, "ram_min")} – ${sval(st, "ram_max")}", 14f, ACCENT, bold = true, mono = true),
-                LinearLayout.LayoutParams(-2, -2))
-            addView(row)
-            if (running) addView(tv("El cambio aplica cuando reinicies el servidor.", 11.5f, FAINT),
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
-            addBtn("Cambiar RAM", Style.SECONDARY, height = 44f, marginTop = 8f) { openRamDialog(st) }
+        // ── aplicación ──
+        section("Aplicación")
+        col.addView(tv("Versión ${appVersion()}", 13.5f, TEXT), LinearLayout.LayoutParams(-1, -2))
+        if (!hasStorage()) {
+            col.addView(tv("Sin acceso a archivos.", 12f, WARN),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f); bottomMargin = px(4f) })
+            col.addBtn("Conceder acceso", Style.SECONDARY, height = 44f, marginTop = 2f) { requestStorage() }
         }
 
-        // ── propiedades del servidor ──────────────────────────────────
-        col.addCard(marginTop = 12f) {
-            addView(tv("Reglas del mundo", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-            addView(tv("Modo de juego, dificultad, mensaje de la lista… los mismos ajustes de server.properties.", 12.5f, MUTED))
-            addBtn("Editar propiedades", Style.SECONDARY, height = 44f, marginTop = 10f) { openPropsDialog() }
-            if (running) addView(tv("Los cambios aplican cuando reinicies el servidor.", 11.5f, FAINT),
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
-        }
-
-        // ── respaldos ──────────────────────────────────────────────────
-        col.addCard(marginTop = 12f) {
-            addView(tv("Respaldos", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(8f)))
-            addView(tv("Copia tu mundo en un archivo. Se conservan los 5 más recientes.", 12.5f, MUTED))
-            addBtn("Crear respaldo ahora", Style.SECONDARY, height = 44f, marginTop = 10f) {
-                runTermux("backup")
-                toast("Respaldo en proceso…")
-                scope.launch { delay(5000); if (tab == Tab.SETTINGS) render() }
-            }
-            val backups = File(Embed.home(this@MainActivity), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-            if (backups.isEmpty()) {
-                addView(tv("Aún no hay respaldos.", 12.5f, FAINT), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
-            } else {
-                backups.take(5).forEach { f ->
-                    val kb = f.length() / 1024
-                    addView(tv(f.name, 13f, TEXT, bold = true, mono = true), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
-                    addView(tv("$kb KB", 11f, FAINT), LinearLayout.LayoutParams(-1, -2))
-                }
-            }
-        }
-
-        // ── aplicación (mínimo) ────────────────────────────────────────
-        col.addCard(marginTop = 12f) {
-            addView(tv("Aplicación", 11f, FAINT, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-            addInfo("Versión", appVersion())
-            if (!hasStorage()) {
-                addView(tv("Falta el acceso a archivos: los respaldos y el mundo no son visibles fuera de la app.", 12f, WARN),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f); bottomMargin = px(4f) })
-                addBtn("Conceder acceso a archivos", Style.SECONDARY, height = 44f, marginTop = 2f) { requestStorage() }
-            }
-        }
-
-        // ── zona de peligro ────────────────────────────────────────────
-        col.addCard(marginTop = 12f) {
-            addView(tv("Zona de peligro", 11f, DANGER, bold = true, ls = 0.06f))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(8f)))
-            addView(tv("Borra el servidor, su mundo, los mods y los ajustes. No se puede deshacer.", 12.5f, MUTED))
-            addBtn("Borrar servidor", Style.DANGER, height = 46f, marginTop = 10f) { confirmDelete() }
-        }
+        // ── peligro ──
+        col.addBtn("Borrar servidor", Style.DANGER_TEXT, height = 46f, marginTop = 28f) { confirmDelete() }
         return sv().apply { addView(col) }
     }
 
@@ -1178,7 +1057,7 @@ class MainActivity : Activity() {
             col.addCard {
                 addView(tv("Acceso a archivos", 11f, FAINT, bold = true, ls = 0.06f))
                 addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-                addView(tv("MCPanel guarda tu mundo y sus respaldos en una carpeta del teléfono, para que puedas verlos o copiarlos tú mismo. Necesita tu permiso para escribir ahí.", 13f, TEXT))
+                addView(tv("Tus mundos y respaldos viven en una carpeta del teléfono.", 13f, TEXT))
                 addBtn("Conceder acceso a archivos", Style.PRIMARY, marginTop = 12f) {
                     requestStorage()
                 }
@@ -1198,8 +1077,6 @@ class MainActivity : Activity() {
             col.addCard(marginTop = 10f) {
                 addView(txt)
                 addView(bar, LinearLayout.LayoutParams(-1, px(6f)).apply { topMargin = px(10f) })
-                addView(tv("Solo ocurre la primera vez. No cierres la app.", 12f, FAINT),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
             }
             pollJob?.cancel()
             pollJob = scope.launch {
@@ -1218,7 +1095,6 @@ class MainActivity : Activity() {
                         } else if (p == null) {
                             bar.isIndeterminate = true
                         }
-                        friendlyPhase(tail)?.let { txt.text = it }
                     }
                 }
             }
@@ -1226,7 +1102,6 @@ class MainActivity : Activity() {
             col.addCard(marginTop = 10f) {
                 addView(tv("Preparación inicial", 11f, FAINT, bold = true, ls = 0.06f))
                 addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-                addView(tv("Hay que instalar unas piezas internas. Se hace una sola vez y tarda unos minutos.", 13f, TEXT))
                 addBtn("Preparar", Style.SECONDARY, marginTop = 10f) {
                     clearError()
                     installing = true
@@ -1250,19 +1125,19 @@ class MainActivity : Activity() {
             render()
         }
         if (!ready && hasError(readState())) {
-            col.addBtn("Ver qué pasó", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Última ejecución", lastRunLog) }
+            col.addBtn("Ver registro", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Última ejecución", lastRunLog) }
         }
     }
 
     private fun setupLoader(col: LinearLayout) {
-        col.addHeader("¿Qué tipo de servidor?", "Elige según lo que quieras jugar. Puedes cambiarlo después.")
+        col.addHeader("¿Qué tipo de servidor?")
         val loaders = listOf(
-            Triple("paper", "Paper", "El más popular. Rápido y estable, con plugins."),
-            Triple("fabric", "Fabric", "Mods ligeros y modernos (rendimiento, optimización)."),
-            Triple("forge", "Forge", "La casa de los mods clásicos."),
-            Triple("neoforge", "NeoForge", "El heredero moderno de Forge.")
+            "paper" to "Paper",
+            "fabric" to "Fabric",
+            "forge" to "Forge",
+            "neoforge" to "NeoForge"
         )
-        loaders.forEach { (id, name, desc) ->
+        loaders.forEach { (id, name) ->
             val sel = wizardLoader == id
             val c = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1275,7 +1150,6 @@ class MainActivity : Activity() {
             head.addView(tv(if (sel) "✓ Seleccionado" else if (id == "paper") "Recomendado" else "", 11f, if (sel) ACCENT else FAINT, bold = true),
                 LinearLayout.LayoutParams(-2, -2))
             c.addView(head)
-            c.addView(tv(desc, 12.5f, MUTED), LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
             col.addView(c, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
         }
         col.addBtn("Continuar", Style.PRIMARY, marginTop = 18f) {
@@ -1287,7 +1161,7 @@ class MainActivity : Activity() {
     }
 
     private fun setupVersion(col: LinearLayout) {
-        col.addHeader("Versión de Minecraft", "La más reciente es casi siempre la mejor opción.")
+        col.addHeader("Versión de Minecraft")
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val manual = EditText(this).apply {
             hint = "…o escribe una versión exacta (ej. 1.20.1)"
@@ -1353,21 +1227,18 @@ class MainActivity : Activity() {
     private fun setupSummary(col: LinearLayout) {
         val version = wizardVersion ?: ""
         val total = ramMB()
-        val (rmin, rmax) = ramPreset(total)
-        col.addHeader("Resumen", "Revisa antes de instalar (tarda unos minutos).")
+        val rmax = ramPreset(total).second
+        col.addHeader("Resumen")
         col.addCard {
             addInfo("Cargador", prettyLoader(wizardLoader))
-            addInfo("Minecraft", version)
+            addInfo("Juego", gameLabel(version))
             addInfo("RAM del teléfono", "$total MB", MUTED, monoValue = false)
-            addInfo("RAM para el servidor", "$rmin – $rmax", ACCENT)
+            addInfo("RAM", prettyRam(rmax), ACCENT)
             addInfo("Tipo", loaderKind(wizardLoader))
         }
         if (total < 3072) {
-            col.addCard(marginTop = 10f) {
-                addView(tv("⚠  Pocos recursos", 13f, WARN, bold = true))
-                addView(tv("Este teléfono tiene poca RAM: el servidor puede ir lento o no arrancar con versiones recientes. Te recomendamos un mundo en una versión más antigua o en Paper.", 12.5f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
-            }
+            col.addView(tv("Poca RAM: puede ir lento.", 12.5f, WARN),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
         }
         col.addBtn("Instalar servidor", Style.PRIMARY, marginTop = 18f) {
             clearError()
@@ -1406,10 +1277,8 @@ class MainActivity : Activity() {
     private fun setupInstalling(col: LinearLayout) {
         col.gravity = Gravity.CENTER_HORIZONTAL
         col.addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(26f)))
-        col.addView(tv("Instalando tu servidor", 24f, TEXT, bold = true).apply { gravity = Gravity.CENTER },
+        col.addView(tv("Instalando…", 24f, TEXT, bold = true).apply { gravity = Gravity.CENTER },
             LinearLayout.LayoutParams(-1, -2))
-        col.addView(tv("Tarda unos minutos. No cierres la app.", 13f, MUTED).apply { gravity = Gravity.CENTER },
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
         col.addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(18f)))
 
         val done = TextView(this).apply { textSize = 17f; gravity = Gravity.CENTER; setTextColor(ACCENT); typeface = Typeface.DEFAULT_BOLD }
@@ -1428,8 +1297,8 @@ class MainActivity : Activity() {
             addView(bar, LinearLayout.LayoutParams(-1, px(6f)).apply { topMargin = px(18f) })
         }
 
-        done.text = "Descargando e instalando…"
-        detail.text = "${prettyLoader(wizardLoader)}\nMinecraft ${wizardVersion ?: ""}"
+        done.text = "Instalando…"
+        detail.text = wizardVersion ?: ""
         pollJob?.cancel()
         pollJob = scope.launch {
             while (isActive) {
@@ -1448,12 +1317,8 @@ class MainActivity : Activity() {
                 } else if (p == null) {
                     bar.isIndeterminate = true
                 }
-                friendlyPhase(s)?.let { done.text = it }
                 if (st?.optBoolean("installed") == true) {
-                    done.text = "¡Listo! Tu servidor está instalado."
-                    bar.isIndeterminate = false
-                    bar.progress = bar.max
-                    delay(1200)
+                    delay(800)
                     wizard = "welcome"
                     prefs.edit().putString("last_tab", Tab.HOME.id).apply()
                     tab = Tab.HOME
@@ -1462,9 +1327,7 @@ class MainActivity : Activity() {
                 }
                 if (st != null && hasError(st) && sval(st, "last_action") == "error") {
                     done.setTextColor(WARN)
-                    done.text = "Algo salió mal en la instalación"
-                    bar.isIndeterminate = false
-                    bar.progress = bar.max
+                    done.text = "Error en la instalación"
                     delay(1800)
                     wizard = "summary"
                     render()
@@ -1474,18 +1337,4 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Convierte las líneas del log de instalación en frases amables. */
-    private fun friendlyPhase(tail: String): String? {
-        val t = tail.takeLast(12000)
-        return when {
-            t.contains("install: complete") -> "Finalizando…"
-            t.contains("installer") && t.contains("running") -> "Configurando el cargador…"
-            t.contains("download") || t.contains("Downloading") || t.contains("wget") -> "Descargando los archivos del servidor…"
-            t.contains("java") && (t.contains("install") || t.contains("Setting up")) -> "Instalando Java…"
-            t.contains("bootstrap: base packages") -> "Herramientas listas"
-            t.contains("pkg ") || t.contains("apt") || t.contains("dpkg") -> "Instalando paquetes…"
-            t.contains("fabric") || t.contains("forge") || t.contains("paper") || t.contains("neoforge") -> "Preparando el cargador…"
-            else -> null
-        }
-    }
 }
