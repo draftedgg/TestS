@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application android:theme="@style/AppTheme" android:label="MCPanel" android:allowBackup="false" android:supportsRtl="true" android:requestLegacyExternalStorage="true">
@@ -15,5 +16,6 @@
         </activity>
         <service android:name=".DownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".ServerService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".KeepAliveService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

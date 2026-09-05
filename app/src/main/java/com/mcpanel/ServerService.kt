@@ -46,6 +46,7 @@ class ServerService : Service() {
                     }
                 }
             } finally {
+                syncKeepAlive()
                 try {
                     val log = Embed.lastRunLog(this)
                     log.parentFile?.mkdirs()
@@ -72,6 +73,21 @@ class ServerService : Service() {
     }
 
     private fun isBusy(): Boolean = synchronized(locks) { locks.any { it.first.isAlive } }
+
+    /** After any command, mirror reality into the keep-alive service: while
+     *  the server or the tunnel is up we hold a wakelock + notification;
+     *  when both are down we release everything. */
+    private fun syncKeepAlive() {
+        try {
+            val f = File(Embed.sharedDir(this), "state.json")
+            var up = false
+            if (f.exists()) {
+                val o = org.json.JSONObject(f.readText())
+                up = o.optBoolean("running") || (o.optJSONObject("playit")?.optBoolean("running") == true)
+            }
+            if (up) KeepAliveService.want(this) else KeepAliveService.cancel(this)
+        } catch (_: Exception) { }
+    }
 
     private fun buildNotification(text: String): Notification {
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)

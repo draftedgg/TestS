@@ -101,6 +101,22 @@ run frobnicate
 echo "$(jq -r '.last_error' "$STATE")" | grep -q 'unknown command' && PASS "unknown command rejects" || FAIL "unknown command"
 [ "$(find "$MC_SHARED" -name '.state.json.tmp' | wc -l)" -eq 0 ] && PASS "atomic temp cleaned" || FAIL "atomic temp remains"
 
+# ─── playit: claim + address detection from tunnel.log ───────────────
+touch "$MC_TMUX_MARKER"   # playit session up (stub shares the marker)
+printf 'Visit https://playit.gg/claim/abc123 to claim this agent\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+[ "$(jq -r '.playit.running' "$STATE")" = true ] && PASS "playit running detected" || FAIL "playit running detected"
+[ "$(jq -r '.playit.claimed' "$STATE")" = false ] && PASS "playit claim detected" || FAIL "playit claim detected"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'playit.gg/claim/abc123' && PASS "playit claim url stored" || FAIL "playit claim url stored"
+printf 'tcp://server-abc.example.playit.gg:25565\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+[ "$(jq -r '.playit.claimed' "$STATE")" = true ] && PASS "playit address claimed" || FAIL "playit address claimed"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'example.playit.gg' && PASS "playit address stored" || FAIL "playit address stored"
+rm -f "$MC_TMUX_MARKER"
+run playit-status
+[ "$(jq -r '.playit.running' "$STATE")" = false ] && PASS "playit stopped cleared" || FAIL "playit stopped cleared"
+[ "$(jq -r '.playit.address' "$STATE")" = null ] && PASS "playit stopped: address null" || FAIL "playit stopped: address null"
+
 # ─── embedded prefix (MCPanel app) ────────────────────────────────────
 EMB="$TMP/embprefix"
 export MC_EMBEDDED=1

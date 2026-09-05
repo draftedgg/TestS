@@ -10,7 +10,7 @@
 #   install --loader paper|fabric|forge|neoforge --version X.Y.Z [--ram-min A --ram-max B]
 #   start | stop | restart | status | send <cmd> | backup
 #   mod-install <file-in-inbox> | mod-remove <name>
-#   playit-start | playit-status
+#   playit-start | playit-stop | playit-status
 #   server-delete
 # ══════════════════════════════════════════════════════════════════════
 set -u
@@ -28,6 +28,7 @@ STATE_FILE="$SHARED/state.json"
 STATE_TMP="$SHARED/.state.json.tmp"
 CONSOLE_LOG="$SHARED/console.log"
 INSTALL_LOG="$SHARED/install.log"
+TUNNEL_LOG="$SHARED/tunnel.log"    # playit agent output (app tails it)
 CONFIG_FILE="$HOME_DIR/.mc_server_config"     # legacy-compatible
 LEGACY_LOG="$HOME_DIR/.mc_installer.log"      # legacy-compatible
 SCRIPT_DIR="$HOME_DIR/mcpanel"
@@ -205,11 +206,15 @@ write_state() { # $1..= jq update expr, e.g. '.running = true' or '.a = 1 | .b =
     merge=$(printf '%s' "$merge" | sed -E 's/[[:space:]]+\.(last_action|last_error|loader|version|ram_min|ram_max|running|started_at|installed|port|playit\.running)([[:space:]]*=)/ | .\1\2/g')
     local ts; ts=$(now_ms)
     local base='{"installed":false,"loader":null,"version":null,"ram_min":null,"ram_max":null,"running":false,"started_at":null,"port":25565,"playit":{"running":false,"claimed":false,"address":null},"last_action":null,"last_error":null,"updated_at":0}'
+    # PID-scoped temp file: the keep-alive service may refresh state.json
+    # in the background while a command writes it. A shared tmp path would
+    # let two writers clobber each other mid-write; this keeps them apart.
+    local TMPF="$SHARED/.state.json.tmp.$$"
     local input="$STATE_FILE"
     [ -s "$STATE_FILE" ] || input=<(echo "$base")
-    jq "${merge} | .updated_at=${ts}" "$input" > "$STATE_TMP" 2>/dev/null \
-      || { echo "$base" | jq "${merge} | .updated_at=${ts}" > "$STATE_TMP"; }
-    mv "$STATE_TMP" "$STATE_FILE"
+    jq "${merge} | .updated_at=${ts}" "$input" > "$TMPF" 2>/dev/null \
+      || { echo "$base" | jq "${merge} | .updated_at=${ts}" > "$TMPF"; }
+    mv "$TMPF" "$STATE_FILE"
 }
 
 state_set_error() {
@@ -538,10 +543,7 @@ cmd_restart() {
 
 cmd_status() {
     refresh_running_state
-    local PLAYIT_RUNNING=false PLAYIT_ADDR=null
-    if tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then PLAYIT_RUNNING=true; fi
-    if [ -f "$HOME_DIR/.playit/claim_url" ]; then PLAYIT_ADDR="\"$(cat "$HOME_DIR/.playit/claim_url" | head -1)\""; fi
-    write_state ".playit.running = $PLAYIT_RUNNING"
+    playit_digest
     log "INF" "status: refreshed"
 }
 
@@ -594,23 +596,56 @@ cmd_mod_remove() {
     log "OK" "mod-remove: $NAME"
 }
 
+# Detect the claim URL / public address from the agent log so the app can
+# show the user what to do (open claim link, then copy the address).
+playit_digest() {
+    local RUN=false CLAIM="" ADDR=""
+    tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null && RUN=true
+    # Only meaningful while the agent is up: a stopped session means no
+    # tunnel, so the app must not keep showing a stale claim/address.
+    if [ "$RUN" = "true" ]; then
+        # legacy playit writes the claim URL to a file it owns
+        if [ -f "$HOME_DIR/.playit/claim_url" ]; then
+            CLAIM=$(head -1 "$HOME_DIR/.playit/claim_url" 2>/dev/null)
+        fi
+        if [ -f "$TUNNEL_LOG" ]; then
+            [ -z "$CLAIM" ] && CLAIM=$(grep -oE 'https://playit\.gg/claim/[A-Za-z0-9]+' "$TUNNEL_LOG" 2>/dev/null | head -1)
+            ADDR=$(grep -oE 'tcp://[^ ]+|udp://[^ ]+|https?://[A-Za-z0-9.-]+\.playit\.gg(:[0-9]+)?' "$TUNNEL_LOG" 2>/dev/null | grep -v '/claim/' | tail -1)
+        fi
+    fi
+    local upd=".playit.running = $RUN"
+    if [ -n "$CLAIM" ]; then
+        upd="$upd | .playit.claimed = false | .playit.address = \"$CLAIM\""
+    elif [ -n "$ADDR" ]; then
+        upd="$upd | .playit.claimed = true  | .playit.address = \"$ADDR\""
+    else
+        upd="$upd | .playit.claimed = null  | .playit.address = null"
+    fi
+    write_state "$upd"
+}
+
 cmd_playit_start() {
     command -v playit  >/dev/null 2>&1 && PLAYIT_BIN="playit"
     command -v playitd >/dev/null 2>&1 && PLAYIT_BIN="playitd"
     [ -z "$PLAYIT_BIN" ] && { state_set_error "playit-start: not installed"; exit 1; }
     tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
-    tmux new-session -d -s "$PLAYIT_SESSION" "$PLAYIT_BIN >> $INSTALL_LOG 2>&1"
+    : > "$TUNNEL_LOG" 2>/dev/null || true
+    tmux new-session -d -s "$PLAYIT_SESSION" "$PLAYIT_BIN >> '$TUNNEL_LOG' 2>&1"
     sleep 2
-    write_state ".playit.running = true .last_action = \"playit-start\" .last_error = null"
+    playit_digest
+    write_state '.last_action = "playit-start" .last_error = null'
     log "OK" "playit-start: session up"
 }
 
+cmd_playit_stop() {
+    tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
+    playit_digest
+    write_state '.last_action = "playit-stop" .last_error = null'
+    log "OK" "playit-stop: session down"
+}
+
 cmd_playit_status() {
-    if tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then
-        write_state ".playit.running = true"
-    else
-        write_state ".playit.running = false"
-    fi
+    playit_digest
     log "INF" "playit-status: refreshed"
 }
 
@@ -637,6 +672,7 @@ case "$CMD" in
     mod-install)    cmd_mod_install "$@" ;;
     mod-remove)     cmd_mod_remove "$@" ;;
     playit-start)   cmd_playit_start "$@" ;;
+    playit-stop)    cmd_playit_stop "$@" ;;
     playit-status)  cmd_playit_status "$@" ;;
     server-delete)  cmd_server_delete "$@" ;;
     *) state_set_error "unknown command: ${CMD:-<none>}"; exit 1 ;;

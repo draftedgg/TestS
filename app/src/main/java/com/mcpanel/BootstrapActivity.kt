@@ -29,11 +29,11 @@ import kotlinx.coroutines.withContext
  */
 class BootstrapActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val BLACK = Color.rgb(0, 0, 0)
-    private val FG = Color.rgb(232, 232, 232)
-    private val MUTED = Color.rgb(119, 119, 119)
-    private val ACCENT = Color.rgb(0, 224, 127)
-    private val ERROR = Color.rgb(255, 69, 58)
+    private val BLACK = Color.rgb(11, 15, 20)
+    private val FG = Color.rgb(237, 242, 247)
+    private val MUTED = Color.rgb(148, 163, 184)
+    private val ACCENT = Color.rgb(46, 229, 157)
+    private val ERROR = Color.rgb(255, 107, 94)
 
     private lateinit var status: TextView
     private lateinit var bar: ProgressBar
@@ -58,6 +58,8 @@ class BootstrapActivity : Activity() {
         col.addView(bar)
         retry = Button(this).apply {
             text = "REINTENTAR"; setTextColor(BLACK); setBackgroundColor(ACCENT); isAllCaps = true
+            minHeight = 0
+            setPadding(32, 0, 32, 0)
             visibility = View.GONE
             setOnClickListener { install() }
         }
