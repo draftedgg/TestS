@@ -17,6 +17,7 @@ FAIL() { printf 'FAIL: %s\n' "$1"; FAILS=$((FAILS + 1)); }
 cat > "$STUB/tmux" <<'EOF'
 #!/usr/bin/env bash
 marker="${MC_TMUX_MARKER:-/tmp/mc-tmux-marker}"
+[ -n "${MC_TMUX_LOG:-}" ] && printf 'tmux %s\n' "$*" >> "$MC_TMUX_LOG"
 case "${1:-}" in
   has-session) [ -f "$marker" ] && exit 0 || exit 1 ;;
   new-session)
@@ -57,8 +58,9 @@ done
 EOF
 chmod +x "$STUB/wget"
 # playit-cli stub: claim generate|url|exchange, reset. Honors MC_PLAYIT_EXCHANGE_FAIL
-# and MC_PLAYIT_WARN (warning line on stdout before the payload). Counts
-# exchange calls in $MC_CALLS when set.
+# (rc 1), MC_PLAYIT_NAKED (rc 0 but no secret line) and MC_PLAYIT_WARN
+# (warning line on stdout before the payload). Counts exchange calls in
+# $MC_CALLS when set.
 cat > "$STUB/playit-cli" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
@@ -69,7 +71,11 @@ case "$args" in
   *"claim url"*) echo "https://playit.gg/claim/abc-def-123" ;;
   *"claim exchange"*)
     [ -n "${MC_CALLS:-}" ] && echo "exchange" >> "$MC_CALLS"
-    if [ "${MC_PLAYIT_EXCHANGE_FAIL:-0}" = "1" ]; then exit 1; fi
+    if [ "${MC_PLAYIT_EXCHANGE_FAIL:-0}" = "1" ]; then echo "timed out"; exit 1; fi
+    if [ "${MC_PLAYIT_NAKED:-0}" = "1" ]; then echo "still waiting"; exit 0; fi
+    echo "Open this link to finish setting up playit:"
+    echo "https://playit.gg/claim/abc-def-123"
+    echo "74f8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6509"
     exit 0 ;;
   *reset*) exit 0 ;;
   *) exit 0 ;;
@@ -192,15 +198,43 @@ MC_PLAYIT_EXCHANGE_FAIL=1 run playit-exchange
 echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no se aprobó' && PASS "playit-exchange timeout recorded" || FAIL "playit-exchange timeout error"
 [ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "playit-exchange timeout keeps unlinked" || FAIL "playit-exchange timeout link"
 
-# exchange approved → linked; seed an address so the chained wait resolves
-printf 'your-server.gl.at.ply.gg:12345\n' >> "$MC_SHARED/tunnel.log"
-run playit-exchange
+# exchange approved → linked. NOTE: the post-secret relaunch truncates
+# tunnel.log, so a manual seed would be wiped; the address must come from
+# the relaunch itself via the MC_PLAYIT_SEED tmux hook.
+MC_PLAYIT_SEED='your-server.gl.at.ply.gg:12345' MC_TMUX_LOG="$TMP/tmux.log" run playit-exchange
 [ "$?" -eq 0 ] && PASS "playit-exchange ok" || FAIL "playit-exchange exit"
 [ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "playit-exchange links" || FAIL "playit-exchange link"
 [ "$(jq -r '.playit.needs_claim' "$STATE")" = false ] && PASS "playit-exchange clears needs_claim" || FAIL "playit-exchange needs_claim"
 echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'gl.at.ply.gg:12345' && PASS "playit-exchange publishes address" || FAIL "playit-exchange address"
+TOML="$MC_HOME/.config/playit_gg/playit.toml"
+grep -q '^secret_key = "74f8aaa' "$TOML" && PASS "playit-exchange writes toml" || FAIL "playit-exchange toml content"
+[ "$(stat -c %a "$TOML" 2>/dev/null || stat -f %p "$TOML")" = "600" ] && PASS "playit-exchange toml 600" || FAIL "playit-exchange toml perms"
+[ ! -f "$MC_HOME/.playit-exchange.out" ] && PASS "playit-exchange shreds capture" || FAIL "playit-exchange capture remains"
+! grep -q '74f8aaa' "$MC_SHARED/install.log" && PASS "playit-exchange keeps secret out of install.log" || FAIL "playit-exchange secret leaked"
+grep -q -- '--secret-path' "$TMP/tmux.log" && PASS "playit-exchange relaunches with flag" || FAIL "playit-exchange relaunch flag"
+rm -f "$TMP/tmux.log"
 
-# linked start reuses the live session (no fresh claim minted)
+# exchange rc=0 but no secret line → must NOT mark linked
+run playit-unlink >/dev/null 2>&1
+run playit-claim >/dev/null 2>&1
+MC_PLAYIT_NAKED=1 run playit-exchange
+[ "$?" -ne 0 ] && PASS "playit-exchange naked rejects" || FAIL "playit-exchange naked exit"
+[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "playit-exchange naked stays unlinked" || FAIL "playit-exchange naked link"
+echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no se pudo leer el secreto' && PASS "playit-exchange naked recorded" || FAIL "playit-exchange naked error"
+run playit-unlink >/dev/null 2>&1
+rm -f "$MC_TMUX_MARKER"
+
+# scrub: stale bare-hex token lines vanish from install.log on claim
+printf '74f8bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb6509\n' >> "$MC_SHARED/install.log"
+run playit-claim >/dev/null 2>&1
+! grep -q '74f8bbb' "$MC_SHARED/install.log" && PASS "playit-claim scrubs leaked tokens" || FAIL "playit-claim scrub"
+run playit-unlink >/dev/null 2>&1
+rm -f "$MC_TMUX_MARKER"
+
+# linked start reuses the live session (no fresh claim minted).
+# Set up linked state explicitly: prior blocks may have unlinked.
+run playit-claim >/dev/null 2>&1
+MC_PLAYIT_SEED='your-server.gl.at.ply.gg:12345' run playit-exchange >/dev/null 2>&1
 run playit-start
 [ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start linked ok" || FAIL "playit-start linked"
 [ "$(jq -r '.playit.claim_code' "$STATE")" = "abc-def-123" ] && PASS "playit-start keeps claim code" || FAIL "playit-start claim kept"

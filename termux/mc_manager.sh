@@ -848,6 +848,9 @@ cmd_playit_start() {
 cmd_playit_claim() {
     local CLI; CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; exit 1; }
     playit_ensure_daemon || exit 1
+    # Hygiene: drop bare 64-hex token lines a previous version may have
+    # leaked into the shared install log. No legitimate line looks like that.
+    sed -i '/^[0-9a-fA-F]\{64,\}$/d' "$INSTALL_LOG" 2>/dev/null || true
     local RAW CODE URL
     # Grep, not tr: --stdout is machine-oriented but a warning line would
     # glue into the token. Dashed shape first (real codes look like
@@ -878,24 +881,46 @@ playit_exchange_locked() {
 }
 playit_exchange_unlock() { rm -rf "$SHARED/.playit-exchange.lock" 2>/dev/null; }
 
-# Run the blocking exchange for $1=CODE (daemon must be up). Writes linked
-# state + waits for the address. Returns 0/1, never exits (callers decide).
+# Run the blocking exchange for $1=CODE (daemon must be up). Captures the
+# secret the CLI prints on stdout into a PRIVATE file (never $SHARED),
+# writes it to the daemon's toml and relaunches the daemon WITH
+# --secret-path. Returns 0/1, never exits (callers decide).
 playit_do_exchange() {
     local CODE="$1" CLI
     CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; return 1; }
+    local CAP SECRET RC
+    CAP="$HOME_DIR/.playit-exchange.out"; SECRET=""; RC=0
+    rm -f "$CAP"
     log "INF" "playit-exchange: esperando aprobación en el navegador…"
-    if timeout 120 "$CLI" --stdout claim exchange --wait 75 "$CODE" >>"$INSTALL_LOG" 2>&1; then
-        write_state ".playit.secret = true .playit.needs_claim = false .last_action = \"playit-exchange\" .last_error = null"
-        log "OK" "playit-exchange: agent vinculado"
-        if playit_wait_address; then
-            write_state '.last_action = "playit-exchange" .last_error = null'
-            log "OK" "playit-exchange: address published"
-            return 0
-        fi
-        state_set_error "playit vinculado pero sin dirección. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
+    timeout 120 "$CLI" --stdout claim exchange --wait 75 "$CODE" >"$CAP" 2>>"$INSTALL_LOG" || RC=$?
+    # Last non-empty line that is not a reminder/URL and has no spaces.
+    SECRET=$(grep -vE '^[[:space:]]*$' "$CAP" 2>/dev/null | grep -viE '^(http|open this link)' | grep -vE '[[:space:]]' | tail -n 1 || true)
+    [ "${#SECRET}" -lt 32 ] 2>/dev/null && SECRET=""
+    shred -u "$CAP" 2>/dev/null || rm -f "$CAP"
+    if [ $RC -ne 0 ] || [ -z "$SECRET" ]; then
+        state_set_error "playit: no se aprobó a tiempo o no se pudo leer el secreto (abre el enlace y pulsa Iniciar túnel para generar uno nuevo)"
         return 1
     fi
-    state_set_error "playit: no se aprobó a tiempo (abre el enlace y pulsa Iniciar túnel para generar uno nuevo)"
+    mkdir -p "$HOME_DIR/.config/playit_gg"
+    printf 'secret_key = "%s"\n' "$SECRET" > "$HOME_DIR/.config/playit_gg/playit.toml"
+    chmod 600 "$HOME_DIR/.config/playit_gg/playit.toml"
+    SECRET=""
+    # The waiting daemon never saw a secret: relaunch it pointed at the toml.
+    tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
+    sleep 1
+    local DAEMON; DAEMON=$(playit_daemon_bin) || { state_set_error "playit: no se encontró playitd"; return 1; }
+    : > "$TUNNEL_LOG" 2>/dev/null || true
+    local AGENT_PREFIX=""
+    command -v stdbuf >/dev/null 2>&1 && AGENT_PREFIX="stdbuf -o0 -e0 "
+    tmux new-session -d -s "$PLAYIT_SESSION" "${AGENT_PREFIX}$DAEMON --secret-path '$HOME_DIR/.config/playit_gg/playit.toml' >> '$TUNNEL_LOG' 2>&1" || { state_set_error "playit: no se pudo relanzar el daemon"; return 1; }
+    write_state ".playit.secret = true .playit.needs_claim = false .last_action = \"playit-exchange\" .last_error = null"
+    log "OK" "playit-exchange: agent vinculado"
+    if playit_wait_address; then
+        write_state '.last_action = "playit-exchange" .last_error = null'
+        log "OK" "playit-exchange: address published"
+        return 0
+    fi
+    state_set_error "playit vinculado pero sin dirección. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
     return 1
 }
 
@@ -925,6 +950,7 @@ cmd_playit_exchange() {
 cmd_playit_unlink() {
     tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
     local CLI; CLI=$(playit_cli 2>/dev/null) && "$CLI" reset >>"$INSTALL_LOG" 2>&1 || true
+    rm -f "$HOME_DIR/.config/playit_gg/playit.toml" "$HOME_DIR/.playit-exchange.out"
     playit_digest
     write_state '.playit.secret = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
     log "OK" "playit-unlink: desvinculado"

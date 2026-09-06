@@ -38,10 +38,10 @@ Resultado: el preset por RAM física siempre gana; el botón "Cambiar RAM" (ram-
 
 ### Túnel playit v1.0.x — flujo claim vía playit-cli (corrige el modelo secret-pegado)
 - [x] El flujo "pegar secret_key del dashboard" no existe en playit.gg: el claim ES lo que crea el agent. Revertido entero.
-- [x] El paquete TUR instala `playit-cli` junto a `playitd`: `claim generate` → código, `claim url` → URL, `claim exchange --wait` → secreto por IPC al daemon (nunca impreso/logueado/guardado).
-- [x] Nuevos subcomandos `playit-claim` (genera y guarda URL+código, sale 0) y `playit-exchange` (espera aprobación con `--wait 75` y encadena espera de dirección; lock mkdir anti-doble-ejecución).
+- [x] El paquete TUR instala `playit-cli` junto a `playitd`: `claim generate` → código, `claim url` → URL, `claim exchange --wait` imprime el secreto por stdout (captura privada, nunca `$SHARED`).
+- [x] Nuevos subcomandos `playit-claim` (genera y guarda URL+código, sale 0; purga líneas hex-64 filtradas de `install.log`) y `playit-exchange` (captura secreto a fichero privado, escribe `secret_key` en toml 600, tritura captura, relanza daemon con `--secret-path`, encadena espera de dirección; lock mkdir anti-doble-ejecución).
 - [x] `playit-start` sin vínculo genera claim fresco (regenerar-siempre: los códigos caducan); vinculado asegura daemon y espera dirección.
-- [x] Nuevo `playit-unlink` (mata sesión + `playit-cli reset` + limpia campos). Borrados `playit-secret`/`playit-secret-clear` y todo rastro de `playit.toml`.
+- [x] Nuevo `playit-unlink` (mata sesión + `playit-cli reset` + borra toml + limpia campos). Borrado el modelo secret-pegado.
 - [x] Estado: `playit.claim_url`, `playit.claim_code`, `playit.needs_claim`; `playit.secret` = vinculado-tras-exchange.
 - [x] App: rama claim en Inicio (URL + Abrir enlace + "Confirmar vinculación" con helper de orden), auto-exchange con delay tras el tap inicial (MC_PLAYIT_CLAIM_DELAY=20s), Ajustes Vincular/Desvincular, diálogo de pegado borrado, watcher con claim en la firma.
 - [x] Tests: stub playit-cli/playitd/timeout + ~15 casos del flujo (claim, exchange ok/timeout/sin-pendiente, start vinculado/sin-vínculo, unlink).

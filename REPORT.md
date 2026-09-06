@@ -31,8 +31,14 @@ flujo actual (sin pegar nada a mano):
    cuenta: **el claim ES lo que crea el agent**, no hay "Create Agent"
    previo en el dashboard.
 4. `playit-exchange` = `playit-cli claim exchange --wait 75 <code>`
-   (lock mkdir anti-doble-ejecución, staleness 150s); el secreto viaja al
-   daemon por IPC y **nunca se imprime, loguea ni guarda en state.json**.
+   (lock mkdir anti-doble-ejecución, staleness 150s). El CLI **imprime el
+   secreto por stdout al aprobarse**: se captura a fichero privado
+   (`$HOME/.playit-exchange.out`, jamás `$SHARED`), se extrae (última
+   línea sin espacios, no-URL, ≥32 chars), se escribe
+   `secret_key = "…"` en `$HOME/.config/playit_gg/playit.toml` (modo 600,
+   sobrescribe), se tritura la captura y se **relanza el daemon con
+   `--secret-path <toml>`** (flag verificado en `playitd --help` 1.0.6 del
+   dispositivo). Sin línea candidata → error, nunca falso vinculado.
    Luego espera la dirección publicada. El botón manual "Confirmar
    vinculación" (con la página abierta) ejecuta lo mismo sin espera.
 5. El usuario crea un Tunnel en `playit.gg/account/tunnels` apuntando al
@@ -42,6 +48,14 @@ flujo actual (sin pegar nada a mano):
    reclamar de cero.
 
 Los códigos caducan: cada `playit-start` sin vínculo genera uno nuevo.
+
+> **Nota de seguridad (fuga histórica):** las builds ≤0.16 redirigían el
+> stdout del exchange a `install.log` (almacenamiento compartido), por lo
+> que cualquier secreto generado con ellas puede seguir ahí en claro.
+> `playit-claim` purga automáticamente líneas `^[0-9a-fA-F]{64,}$` del log
+> (ninguna línea legítima tiene esa forma). Tras actualizar: borrar
+> `MCPanel/install.log`, `Desvincular` y reclamar de cero para jubilar el
+> secreto filtrado.
 
 ## Dependencias declaradas
 
