@@ -530,8 +530,8 @@ class MainActivity : Activity() {
             if (running) ACCENT else MUTED, bold = true),
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
         if (err.isNotEmpty()) {
-            col.addView(tv(err, 12.5f, WARN), LinearLayout.LayoutParams(-1, -2).apply {
-                topMargin = px(8f); maxLines = 2 })
+            col.addView(tv(err, 12.5f, WARN).apply { maxLines = 2 }, LinearLayout.LayoutParams(-1, -2).apply {
+                topMargin = px(8f) })
         }
         col.addBtn(if (serverBusy) (busyText ?: "…") else if (running) "Apagar" else "Encender",
             if (running) Style.DANGER else Style.PRIMARY,
@@ -960,7 +960,7 @@ class MainActivity : Activity() {
                 val kb = f.length() / 1024
                 val kbS = if (kb >= 1024) "${kb / 1024} MB" else "$kb KB"
                 wrap.addView(tv(f.name, 13f, TEXT, bold = true, mono = true))
-                wrap.addView(tv(kbS, 11f, FAINT).apply { bottomMargin = px(8f) })
+                wrap.addView(tv(kbS, 11f, FAINT), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
             }
         }
         AlertDialog.Builder(this)
