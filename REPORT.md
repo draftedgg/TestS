@@ -20,18 +20,25 @@ flujo actual (sin pegar nada a mano):
 
 1. `playit-start` sin vínculo → genera código+URL frescos
    (`playit-cli claim generate` / `claim url`) y los deja en
-   `state.playit.claim_url` con `needs_claim=true`. La app muestra la URL,
-   `Abrir enlace` y `Ya lo aprobé, continuar`.
-2. El usuario abre el enlace en el navegador (crea cuenta si no tiene) y
-   aprueba. Eso crea/vincula el agent en su cuenta: **el claim ES lo que
-   crea el agent**, no hay "Create Agent" previo en el dashboard.
-3. `playit-exchange` corre `playit-cli claim exchange --wait 90 <code>`;
-   el secreto viaja al daemon por IPC y **nunca se imprime, loguea ni
-   guarda en state.json**. Luego espera la dirección publicada.
-4. El usuario crea un Tunnel en `playit.gg/account/tunnels` apuntando al
+   `state.playit.claim_url` con `needs_claim=true`. La app muestra la URL
+   al instante (~1.5s por el watcher).
+2. Tras una espera de cortesía (`MC_PLAYIT_CLAIM_DELAY`, 20s por defecto)
+   para que el usuario abra la página, el propio `playit-start` lanza el
+   exchange solo: **la página del claim solo detecta al agente cuando
+   `exchange` está corriendo** ("checking every 3 seconds" = espera del
+   lado servidor). Sin exchange en curso no hay nada que aprobar.
+3. El usuario aprueba en el navegador. Eso crea/vincula el agent en su
+   cuenta: **el claim ES lo que crea el agent**, no hay "Create Agent"
+   previo en el dashboard.
+4. `playit-exchange` = `playit-cli claim exchange --wait 75 <code>`
+   (lock mkdir anti-doble-ejecución, staleness 150s); el secreto viaja al
+   daemon por IPC y **nunca se imprime, loguea ni guarda en state.json**.
+   Luego espera la dirección publicada. El botón manual "Confirmar
+   vinculación" (con la página abierta) ejecuta lo mismo sin espera.
+5. El usuario crea un Tunnel en `playit.gg/account/tunnels` apuntando al
    puerto del servidor (`server-port`, default 25565). El daemon publica
    la dirección y la app la lee de `state.json`.
-5. `playit-unlink` mata la sesión y corre `playit-cli reset` para poder
+6. `playit-unlink` mata la sesión y corre `playit-cli reset` para poder
    reclamar de cero.
 
 Los códigos caducan: cada `playit-start` sin vínculo genera uno nuevo.

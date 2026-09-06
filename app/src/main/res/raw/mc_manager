@@ -795,10 +795,34 @@ cmd_playit_start() {
         state_set_error "No se pudo iniciar playit: el agente no se instaló (revisa la conexión e inténtalo otra vez)"
         exit 1
     fi
-    # Not linked yet: generate a fresh claim and let the app show it.
+    # Not linked yet: mint a fresh claim, show it, then auto-exchange after
+    # a grace delay so the user can open the claim page first.
     # Claim codes expire, so every unlinked start mints a new one.
+    # Test hook: MC_PLAYIT_CLAIM_DELAY (default 20s).
     if [ "$(state_field .playit.secret)" != "true" ]; then
-        cmd_playit_claim
+        cmd_playit_claim || exit 1
+        local DELAY="${MC_PLAYIT_CLAIM_DELAY:-20}"
+        log "INF" "playit-start: enlace listo, vinculando solo en ${DELAY}s…"
+        sleep "$DELAY"
+        # Re-evaluate: a manual tap may have linked (or unlinked) meanwhile.
+        # Never exchange blindly.
+        if [ "$(state_field .playit.secret)" = "true" ]; then
+            log "INF" "playit-start: ya vinculado durante la espera"
+        else
+            local CODE2; CODE2=$(state_field .playit.claim_code | sed 's/^null$//')
+            if [ -z "$CODE2" ]; then
+                log "INF" "playit-start: sin claim pendiente tras la espera"
+                exit 0
+            fi
+            playit_ensure_daemon || exit 1
+            if ! playit_exchange_locked; then
+                log "INF" "playit-start: vinculación ya en curso (tap manual)"
+                exit 0
+            fi
+            RC=0; playit_do_exchange "$CODE2" || RC=$?
+            playit_exchange_unlock
+            [ $RC -eq 0 ] || exit 1
+        fi
         return 0
     fi
     # Linked: reuse a live session, else boot a fresh one.
@@ -824,38 +848,76 @@ cmd_playit_start() {
 cmd_playit_claim() {
     local CLI; CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; exit 1; }
     playit_ensure_daemon || exit 1
-    local CODE URL
-    CODE=$("$CLI" --stdout claim generate 2>>"$INSTALL_LOG" | tr -d '[:space:]')
+    local RAW CODE URL
+    # Grep, not tr: --stdout is machine-oriented but a warning line would
+    # glue into the token. Dashed shape first (real codes look like
+    # abc-def-123), plain token fallback.
+    RAW=$("$CLI" --stdout claim generate 2>>"$INSTALL_LOG" || true)
+    CODE=$(printf '%s' "$RAW" | grep -oE '[A-Za-z0-9]+(-[A-Za-z0-9]+)+' | head -1 || true)
+    [ -z "$CODE" ] && CODE=$(printf '%s' "$RAW" | tr -d '[:space:]')
     [ -z "$CODE" ] && { state_set_error "playit: no se pudo generar el código (revisa la conexión)"; exit 1; }
-    URL=$("$CLI" --stdout claim url "$CODE" 2>>"$INSTALL_LOG" | tr -d '[:space:]')
+    URL=$("$CLI" --stdout claim url "$CODE" 2>>"$INSTALL_LOG" | grep -oE 'https://[^[:space:]]+' | head -1 || true)
     [ -z "$URL" ] && URL="https://playit.gg/claim/$CODE"
     write_state ".playit.claim_url = \"$URL\" .playit.claim_code = \"$CODE\" .playit.needs_claim = true .last_action = \"playit-claim\" .last_error = null"
     log "OK" "playit-claim: $URL"
 }
 
-# Exchange an approved claim for the linked secret. Blocks (up to ~90s)
-# waiting for the browser approval; the secret goes straight to the
-# running daemon over IPC and is never printed, logged or stored here.
-cmd_playit_exchange() {
-    local CLI; CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; exit 1; }
-    local CODE; CODE=$(state_field .playit.claim_code | sed 's/^null$//')
-    [ -z "$CODE" ] && { state_set_error "playit: no hay claim pendiente (pulsa Iniciar túnel)"; exit 1; }
-    playit_ensure_daemon || exit 1
+# Mutual exclusion for exchange runs (mkdir is atomic). A lock fresher
+# than 150s means another invocation (auto or manual tap) is already
+# waiting on the same claim; stale locks are a dead owner — steal them.
+playit_exchange_locked() {
+    local LOCK="$SHARED/.playit-exchange.lock" MT NOW
+    if mkdir "$LOCK" 2>/dev/null; then return 0; fi
+    MT=$(stat -c %Y "$LOCK" 2>/dev/null || stat -f %m "$LOCK" 2>/dev/null || echo 0)
+    NOW=$(date +%s)
+    if [ $((NOW - MT)) -gt 150 ]; then
+        rm -rf "$LOCK" 2>/dev/null
+        mkdir "$LOCK" 2>/dev/null && return 0
+    fi
+    return 1
+}
+playit_exchange_unlock() { rm -rf "$SHARED/.playit-exchange.lock" 2>/dev/null; }
+
+# Run the blocking exchange for $1=CODE (daemon must be up). Writes linked
+# state + waits for the address. Returns 0/1, never exits (callers decide).
+playit_do_exchange() {
+    local CODE="$1" CLI
+    CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; return 1; }
     log "INF" "playit-exchange: esperando aprobación en el navegador…"
-    if timeout 150 "$CLI" --stdout claim exchange --wait 90 "$CODE" >>"$INSTALL_LOG" 2>&1; then
+    if timeout 120 "$CLI" --stdout claim exchange --wait 75 "$CODE" >>"$INSTALL_LOG" 2>&1; then
         write_state ".playit.secret = true .playit.needs_claim = false .last_action = \"playit-exchange\" .last_error = null"
         log "OK" "playit-exchange: agent vinculado"
         if playit_wait_address; then
             write_state '.last_action = "playit-exchange" .last_error = null'
             log "OK" "playit-exchange: address published"
-        else
-            state_set_error "playit vinculado pero sin dirección. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
-            exit 1
+            return 0
         fi
-    else
-        state_set_error "playit: no se aprobó a tiempo (abre el enlace y pulsa Iniciar túnel para generar uno nuevo)"
-        exit 1
+        state_set_error "playit vinculado pero sin dirección. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
+        return 1
     fi
+    state_set_error "playit: no se aprobó a tiempo (abre el enlace y pulsa Iniciar túnel para generar uno nuevo)"
+    return 1
+}
+
+# Exchange an approved claim for the linked secret. Manual entry point
+# ("Confirmar vinculación" with the claim page open). The secret travels
+# to the running daemon over IPC and is never printed, logged or stored.
+cmd_playit_exchange() {
+    # Already linked (auto-exchange won the race): nothing to do.
+    if [ "$(state_field .playit.secret)" = "true" ]; then
+        log "INF" "playit-exchange: ya vinculado"
+        exit 0
+    fi
+    local CODE; CODE=$(state_field .playit.claim_code | sed 's/^null$//')
+    [ -z "$CODE" ] && { state_set_error "playit: no hay claim pendiente (pulsa Iniciar túnel)"; exit 1; }
+    playit_ensure_daemon || exit 1
+    if ! playit_exchange_locked; then
+        log "INF" "playit-exchange: vinculación ya en curso"
+        exit 0
+    fi
+    RC=0; playit_do_exchange "$CODE" || RC=$?
+    playit_exchange_unlock
+    [ $RC -eq 0 ] || exit 1
 }
 
 # Unlink this agent: stop the tunnel and drop the provisioned secret so the

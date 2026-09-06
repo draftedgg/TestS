@@ -56,14 +56,19 @@ done
 [ -n "$out" ] && { mkdir -p "$(dirname "$out")"; printf 'PK\003\004fakejar' > "$out"; }
 EOF
 chmod +x "$STUB/wget"
-# playit-cli stub: claim generate|url|exchange, reset. Honors MC_PLAYIT_EXCHANGE_FAIL.
+# playit-cli stub: claim generate|url|exchange, reset. Honors MC_PLAYIT_EXCHANGE_FAIL
+# and MC_PLAYIT_WARN (warning line on stdout before the payload). Counts
+# exchange calls in $MC_CALLS when set.
 cat > "$STUB/playit-cli" <<'EOF'
 #!/usr/bin/env bash
 args="$*"
 case "$args" in
-  *"claim generate"*) echo "abc-def-123" ;;
+  *"claim generate"*)
+    [ "${MC_PLAYIT_WARN:-0}" = "1" ] && echo "note: using cached credentials"
+    echo "abc-def-123" ;;
   *"claim url"*) echo "https://playit.gg/claim/abc-def-123" ;;
   *"claim exchange"*)
+    [ -n "${MC_CALLS:-}" ] && echo "exchange" >> "$MC_CALLS"
     if [ "${MC_PLAYIT_EXCHANGE_FAIL:-0}" = "1" ]; then exit 1; fi
     exit 0 ;;
   *reset*) exit 0 ;;
@@ -211,11 +216,43 @@ run playit-exchange
 [ "$?" -ne 0 ] && PASS "playit-exchange no-claim rejects" || FAIL "playit-exchange no-claim exit"
 echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no hay claim pendiente' && PASS "playit-exchange no-claim recorded" || FAIL "playit-exchange no-claim error"
 
-# unlinked start mints a FRESH claim (never an error)
-run playit-start
+# unlinked start mints a FRESH claim, waits MC_PLAYIT_CLAIM_DELAY, then
+# auto-exchanges in the same call (never an error on the happy path)
+: > "$MC_SHARED/tunnel.log"
+MC_PLAYIT_CLAIM_DELAY=0 MC_PLAYIT_SEED='srv.gl.at.ply.gg:9999' run playit-start
 [ "$?" -eq 0 ] && PASS "playit-start unlinked ok" || FAIL "playit-start unlinked exit"
-[ "$(jq -r '.playit.needs_claim' "$STATE")" = true ] && PASS "playit-start unlinked needs_claim" || FAIL "playit-start unlinked needs_claim"
-[ "$(jq -r '.last_action' "$STATE")" = "playit-claim" ] && PASS "playit-start delegates to claim" || FAIL "playit-start delegates"
+[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "playit-start auto-links" || FAIL "playit-start auto-link"
+[ "$(jq -r '.playit.needs_claim' "$STATE")" = false ] && PASS "playit-start auto clears needs_claim" || FAIL "playit-start auto needs_claim"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'gl.at.ply.gg:9999' && PASS "playit-start auto publishes" || FAIL "playit-start auto address"
+[ "$(jq -r '.last_action' "$STATE")" = "playit-exchange" ] && PASS "playit-start ends in exchange" || FAIL "playit-start last action"
+rm -f "$MC_TMUX_MARKER"
+
+# delay is honored (MC_PLAYIT_CLAIM_DELAY=2 → run takes ≥2s) and logged
+run playit-unlink >/dev/null 2>&1
+rm -f "$MC_TMUX_MARKER"
+START_S=$SECONDS
+MC_PLAYIT_CLAIM_DELAY=2 MC_PLAYIT_EXCHANGE_FAIL=1 run playit-start >/dev/null 2>&1 || true
+[ $((SECONDS - START_S)) -ge 2 ] && PASS "playit-start honors claim delay" || FAIL "playit-start claim delay"
+grep -q 'vinculando solo en 2s' "$MC_SHARED/install.log" && PASS "playit-start logs delay" || FAIL "playit-start delay log"
+run playit-unlink >/dev/null 2>&1
+rm -f "$MC_TMUX_MARKER"
+
+# warning line on generate stdout does not corrupt the code
+MC_PLAYIT_WARN=1 run playit-claim
+[ "$(jq -r '.playit.claim_code' "$STATE")" = "abc-def-123" ] && PASS "playit-claim ignores warnings" || FAIL "playit-claim warning parse"
+run playit-unlink >/dev/null 2>&1
+rm -f "$MC_TMUX_MARKER"
+
+# lock contention: manual exchange while one is fresh exits 0, touches nothing
+run playit-claim >/dev/null 2>&1
+BEFORE=$(jq -r '.last_action' "$STATE")
+mkdir "$MC_SHARED/.playit-exchange.lock"
+MC_CALLS="$TMP/calls" run playit-exchange
+[ "$?" -eq 0 ] && PASS "playit-exchange locked exits 0" || FAIL "playit-exchange locked exit"
+[ "$(jq -r '.last_action' "$STATE")" = "$BEFORE" ] && PASS "playit-exchange locked touches nothing" || FAIL "playit-exchange locked state"
+[ ! -s "$TMP/calls" ] && PASS "playit-exchange locked skips CLI" || FAIL "playit-exchange locked CLI call"
+rm -rf "$MC_SHARED/.playit-exchange.lock" "$TMP/calls"
+run playit-unlink >/dev/null 2>&1
 rm -f "$MC_TMUX_MARKER"
 
 # ─── B1: RAM priority is flag > state.json > hardware preset ──────────

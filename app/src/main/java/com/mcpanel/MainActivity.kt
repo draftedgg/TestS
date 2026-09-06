@@ -536,7 +536,9 @@ class MainActivity : Activity() {
                 col.addView(tv(stateClaimUrl, 13f, ACCENT, mono = true).apply { setTextIsSelectable(true) },
                     LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
                 col.addBtn("Abrir enlace", Style.SECONDARY, height = 44f, marginTop = 8f) { open(stateClaimUrl) }
-                col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Ya lo aprobé, continuar", Style.GHOST, height = 44f,
+                col.addView(tv("Tócalo con la página del enlace abierta.", 12f, MUTED),
+                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
+                col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Confirmar vinculación", Style.GHOST, height = 44f,
                     marginTop = 4f, enabled = !tunnelBusy) {
                     if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
                     runWithBusy("tunnel", "Vinculando…", { runTermux("playit-exchange") },
@@ -562,7 +564,7 @@ class MainActivity : Activity() {
                 col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel playit.gg", Style.GHOST, height = 44f,
                     marginTop = 8f, enabled = !tunnelBusy) {
                     if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
-                    runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },
+                    runWithBusy("tunnel", "Vinculando… abre el enlace", { runTermux("playit-start") },
                         { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
                 }
             }
