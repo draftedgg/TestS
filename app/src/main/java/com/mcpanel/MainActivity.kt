@@ -61,6 +61,7 @@ class MainActivity : Activity() {
     private val consoleLog get() = File(shared, "console.log")
     private val installLog get() = File(shared, "install.log")
     private val tunnelLog get() = File(shared, "tunnel.log")
+    private val debugLog get() = File(shared, "playit-debug.log")
     private val lastRunLog get() = File(shared, "last_run.log")
     private val inbox get() = File(shared, "inbox")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -496,6 +497,7 @@ class MainActivity : Activity() {
         val claimUrl = pAddr?.takeIf { !claimed }
         val stateClaimUrl = playit?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" }
         val needsClaim = playit?.optBoolean("needs_claim") == true
+        val linked = playit?.optBoolean("secret") == true
 
         // ── servidor ──
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -553,6 +555,7 @@ class MainActivity : Activity() {
                 col.addView(row)
                 col.addBtn("Abrir playit.gg", Style.GHOST, height = 42f, marginTop = 10f) { open("https://playit.gg/account/tunnels") }
                 col.addBtn("Ver registro", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Registro del túnel", tunnelLog) }
+                if (linked) col.addBtn("Escribir dirección", Style.GHOST, height = 42f, marginTop = 4f) { openAddressDialog() }
             }
             else -> {
                 val lan = lanIp()
@@ -897,6 +900,11 @@ class MainActivity : Activity() {
         } else {
             col.addView(tv("Tras iniciarlo, crea un Tunnel en playit.gg/account/tunnels apuntando al puerto ${serverPort(st)}.", 12f, MUTED),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f); bottomMargin = px(8f) })
+            col.addBtn("Diagnóstico", Style.GHOST, height = 40f, marginTop = 2f) {
+                runTermux("playit-debug")
+                toast("Generando diagnóstico…")
+                scope.launch { delay(2000); showLogDialog("Diagnóstico playit", debugLog) }
+            }
             col.addBtn("Desvincular", Style.GHOST, height = 40f, marginTop = 2f) {
                 AlertDialog.Builder(this).setTitle("Desvincular túnel")
                     .setMessage("El túnel dejará de funcionar hasta que lo vincules de nuevo.")
@@ -939,6 +947,30 @@ class MainActivity : Activity() {
         // ── peligro ──
         col.addBtn("Borrar servidor", Style.DANGER_TEXT, height = 46f, marginTop = 28f) { confirmDelete() }
         return sv().apply { addView(col) }
+    }
+
+    // ── diálogo: dirección manual del túnel ──────────────────────────
+    private fun openAddressDialog() {
+        val input = EditText(this).apply {
+            hint = "xxx.ply.gg:1234"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
+            background = rounded(SURFACE, 12f, STROKE, 1)
+            setPadding(px(12f), 0, px(12f), 0)
+            setSingleLine(true)
+        }
+        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
+        wrap.addView(tv("Copia la dirección pública desde playit.gg/account/tunnels.", 12f, MUTED))
+        wrap.addView(input, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(8f) })
+        AlertDialog.Builder(this)
+            .setTitle("Dirección del túnel")
+            .setView(ScrollView(this).apply { addView(wrap) })
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Guardar") { _, _ ->
+                val v = input.text.toString().trim()
+                if (!Regex("[^\\s:]+:[0-9]+").matches(v)) { toast("Formato host:puerto."); return@setPositiveButton }
+                runTermux("playit-address", v)
+                toast("Dirección guardada.")
+                scope.launch { delay(1200); render() }
+            }.show()
     }
 
     // ── diálogo: cambiar RAM ──────────────────────────────────────────

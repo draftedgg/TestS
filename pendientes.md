@@ -45,6 +45,7 @@ Resultado: el preset por RAM física siempre gana; el botón "Cambiar RAM" (ram-
 - [x] Estado: `playit.claim_url`, `playit.claim_code`, `playit.needs_claim`; `playit.secret` = vinculado-tras-exchange.
 - [x] App: rama claim en Inicio (URL + Abrir enlace + "Confirmar vinculación" con helper de orden), auto-exchange con delay tras el tap inicial (MC_PLAYIT_CLAIM_DELAY=20s), Ajustes Vincular/Desvincular, diálogo de pegado borrado, watcher con claim en la firma.
 - [x] Tests: stub playit-cli/playitd/timeout + ~15 casos del flujo (claim, exchange ok/timeout/sin-pendiente, start vinculado/sin-vínculo, unlink).
+- [x] Dirección por `playit-cli status` (`Secret configured` como verdad del vínculo + snapshot) con fallback a entrada manual (`playit-address`, flag `manual` respetado por el digest); ANSI-strip en el digest; `playit-debug` con volcado redactado; claim_code se limpia al vincular.
 
 ## 3. Documentación (drift con el código)
 - [ ] README/REPORT aún describen el **modo Termux externo** (intents `com.termux.RUN_COMMAND`, `allow-external-apps=true`); la app 0.12 es 100 % embebida (`Embed.runManager`, ProcessBuilder interno).

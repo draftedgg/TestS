@@ -11,7 +11,7 @@
 #   start | stop | restart | status | send <cmd> | backup
 #   mod-install <file-in-inbox> | mod-remove <name>
 #   prop <key> <value> [key value ...] | ram-set <min> <max>
-#   playit-start | playit-stop | playit-status | playit-claim | playit-exchange | playit-unlink
+#   playit-start | playit-stop | playit-status | playit-claim | playit-exchange | playit-unlink | playit-address <host:port> | playit-debug
 #   server-delete
 # ══════════════════════════════════════════════════════════════════════
 set -u
@@ -232,9 +232,9 @@ write_state() { # $1..= jq update expr, e.g. '.running = true' or '.a = 1 | .b =
     local merge="$1"
     # jq requires '|' between separate update expressions. Normalize the
     # space-joined field-update convention used by this script.
-    merge=$(printf '%s' "$merge" | sed -E 's/[[:space:]]+\.(last_action|last_error|loader|version|ram_min|ram_max|running|started_at|installed|port|playit\.running|playit\.secret|playit\.claim_url|playit\.claim_code|playit\.needs_claim|playit\.claimed|playit\.address)([[:space:]]*=)/ | .\1\2/g')
+    merge=$(printf '%s' "$merge" | sed -E 's/[[:space:]]+\.(last_action|last_error|loader|version|ram_min|ram_max|running|started_at|installed|port|playit\.running|playit\.secret|playit\.claim_url|playit\.claim_code|playit\.needs_claim|playit\.claimed|playit\.address|playit\.manual)([[:space:]]*=)/ | .\1\2/g')
     local ts; ts=$(now_ms)
-    local base='{"installed":false,"loader":null,"version":null,"ram_min":null,"ram_max":null,"running":false,"started_at":null,"port":25565,"playit":{"running":false,"claimed":false,"address":null,"secret":false,"claim_url":null,"claim_code":null,"needs_claim":false},"last_action":null,"last_error":null,"updated_at":0}'
+    local base='{"installed":false,"loader":null,"version":null,"ram_min":null,"ram_max":null,"running":false,"started_at":null,"port":25565,"playit":{"running":false,"claimed":false,"address":null,"secret":false,"claim_url":null,"claim_code":null,"needs_claim":false,"manual":false},"last_action":null,"last_error":null,"updated_at":0}'
     # PID-scoped temp file: the keep-alive service may refresh state.json
     # in the background while a command writes it. A shared tmp path would
     # let two writers clobber each other mid-write; this keeps them apart.
@@ -743,8 +743,14 @@ playit_wait_address() {
     return 1
 }
 
+# Strip ANSI color codes from a file to stdout (playitd paints its log;
+# escape tails would otherwise corrupt extracted addresses).
+playit_clean_log() { # $1=file
+    sed -e 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null
+}
+
 playit_digest() {
-    local RUN=false CLAIM="" ADDR=""
+    local RUN=false CLAIM="" ADDR="" ST_SECRET=""
     tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null && RUN=true
     # Only meaningful while the agent is up: a stopped session means no
     # tunnel, so the app must not keep showing a stale claim/address.
@@ -755,25 +761,49 @@ playit_digest() {
         fi
         if [ -f "$TUNNEL_LOG" ]; then
             # modern claim codes contain dashes (abc-def-123)
-            [ -z "$CLAIM" ] && CLAIM=$(grep -oE 'https://playit\.gg/claim/[A-Za-z0-9_?=&%.-]+' "$TUNNEL_LOG" 2>/dev/null | head -1)
-            # modern addresses: tcp://h:port, *.playit.gg, *.ply.gg, *.joinmc.link — often bare
-            ADDR=$(grep -oE '(tcp|udp|https?)://[^[:space:]]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.(at\.ply\.gg|ply\.gg|playit\.gg|joinmc\.link)(:[0-9]+)?' "$TUNNEL_LOG" 2>/dev/null | grep -v '/claim/' | sed -e 's/[.,;:!?)]*$//' | tail -1)
+            [ -z "$CLAIM" ] && CLAIM=$(playit_clean_log "$TUNNEL_LOG" | grep -oE 'https://playit\.gg/claim/[A-Za-z0-9_?=&%.-]+' | head -1)
+            # NOTE (v1.0.6, probado en dispositivo): el log del daemon solo
+            # trae cháchara de control (registered/keepalive/udp/auth) y
+            # NUNCA la dirección pública. Estos patrones quedan para
+            # versiones legacy; la fuente viva es `playit-cli status`.
+            ADDR=$(playit_clean_log "$TUNNEL_LOG" | grep -oE '(tcp|udp|https?)://[^[:space:]]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.(at\.ply\.gg|ply\.gg|playit\.gg|joinmc\.link)(:[0-9]+)?' | grep -v '/claim/' | sed -e 's/[.,;:!?)]*$//' | tail -1)
         fi
+        # playit-cli status: authoritative link signal + second address
+        # source (`Secret configured: true/false`, formato `clave: valor`).
+        # Ignored on any failure (CLI ausente, sin socket, …).
+        local CLI ST
+        CLI=$(playit_cli 2>/dev/null) && ST=$("$CLI" status 2>/dev/null) && [ -n "$ST" ] && {
+            ST=$(printf '%s\n' "$ST" | sed -e 's/\x1b\[[0-9;]*m//g')
+            printf '%s\n' "$ST" > "$SHARED/playit-status.log"
+            case "$ST" in
+                *"Secret configured: true"*) ST_SECRET=true ;;
+                *"Secret configured: false"*) ST_SECRET=false ;;
+            esac
+            [ -z "$ADDR" ] && ADDR=$(printf '%s\n' "$ST" | grep -oE '(tcp|udp|https?)://[^[:space:]]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.(at\.ply\.gg|ply\.gg|playit\.gg|joinmc\.link)(:[0-9]+)?' | grep -v '/claim/' | sed -e 's/[.,;:!?)]*$//' | tail -1)
+        }
     fi
     # Preserve the claim-flow + link fields: only claim/exchange/unlink touch
     # them, so a periodic digest must re-emit what is already stored (this
     # also backfills the keys on states written before they existed).
-    local S CU CC NC SJ CUJ CCJ NCJ
+    local S CU CC NC SJ CUJ CCJ NCJ MAN MJ CURA CURC CURAJ CURCJ
     S=$(state_field .playit.secret); CU=$(state_field .playit.claim_url)
     CC=$(state_field .playit.claim_code); NC=$(state_field .playit.needs_claim)
+    MAN=$(state_field .playit.manual)
     [ "$S" = "true" ] && SJ=true || SJ=false
+    [ -n "$ST_SECRET" ] && SJ="$ST_SECRET"
     { [ "$CU" = "null" ] || [ -z "$CU" ]; } && CUJ=null || CUJ="\"$CU\""
     { [ "$CC" = "null" ] || [ -z "$CC" ]; } && CCJ=null || CCJ="\"$CC\""
     [ "$NC" = "true" ] && NCJ=true || NCJ=false
-    local upd=".playit.running = $RUN .playit.secret = $SJ .playit.claim_url = $CUJ .playit.claim_code = $CCJ .playit.needs_claim = $NCJ"
-    # address wins over claim: after the user claims, the log keeps the old
-    # claim line, so preferring claim would hide the ready address forever.
-    if [ -n "$ADDR" ]; then
+    [ "$MAN" = "true" ] && MJ=true || MJ=false
+    [ "$RUN" != "true" ] && MJ=false
+    CURA=$(state_field .playit.address); CURC=$(state_field .playit.claimed)
+    { [ "$CURA" = "null" ] || [ -z "$CURA" ]; } && CURAJ=null || CURAJ="\"$CURA\""
+    case "$CURC" in true) CURCJ=true;; false) CURCJ=false;; *) CURCJ=null;; esac
+    local upd=".playit.running = $RUN .playit.secret = $SJ .playit.claim_url = $CUJ .playit.claim_code = $CCJ .playit.needs_claim = $NCJ .playit.manual = $MJ"
+    if [ "$MJ" = "true" ] && [ "$RUN" = "true" ]; then
+        # manual address: keep stored values, never null them from empty sources
+        upd="$upd .playit.claimed = $CURCJ .playit.address = $CURAJ"
+    elif [ -n "$ADDR" ]; then
         upd="$upd .playit.claimed = true .playit.address = \"$ADDR\""
     elif [ -n "$CLAIM" ]; then
         upd="$upd .playit.claimed = false .playit.address = \"$CLAIM\""
@@ -861,7 +891,7 @@ cmd_playit_claim() {
     [ -z "$CODE" ] && { state_set_error "playit: no se pudo generar el código (revisa la conexión)"; exit 1; }
     URL=$("$CLI" --stdout claim url "$CODE" 2>>"$INSTALL_LOG" | grep -oE 'https://[^[:space:]]+' | head -1 || true)
     [ -z "$URL" ] && URL="https://playit.gg/claim/$CODE"
-    write_state ".playit.claim_url = \"$URL\" .playit.claim_code = \"$CODE\" .playit.needs_claim = true .last_action = \"playit-claim\" .last_error = null"
+    write_state ".playit.claim_url = \"$URL\" .playit.claim_code = \"$CODE\" .playit.needs_claim = true .playit.manual = false .last_action = \"playit-claim\" .last_error = null"
     log "OK" "playit-claim: $URL"
 }
 
@@ -913,7 +943,7 @@ playit_do_exchange() {
     local AGENT_PREFIX=""
     command -v stdbuf >/dev/null 2>&1 && AGENT_PREFIX="stdbuf -o0 -e0 "
     tmux new-session -d -s "$PLAYIT_SESSION" "${AGENT_PREFIX}$DAEMON --secret-path '$HOME_DIR/.config/playit_gg/playit.toml' >> '$TUNNEL_LOG' 2>&1" || { state_set_error "playit: no se pudo relanzar el daemon"; return 1; }
-    write_state ".playit.secret = true .playit.needs_claim = false .last_action = \"playit-exchange\" .last_error = null"
+        write_state ".playit.secret = true .playit.needs_claim = false .playit.claim_code = null .last_action = \"playit-exchange\" .last_error = null"
     log "OK" "playit-exchange: agent vinculado"
     if playit_wait_address; then
         write_state '.last_action = "playit-exchange" .last_error = null'
@@ -954,6 +984,44 @@ cmd_playit_unlink() {
     playit_digest
     write_state '.playit.secret = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
     log "OK" "playit-unlink: desvinculado"
+}
+
+# Manually set the public address (escape hatch when auto-detection can't
+# see it: v1.0.6 never prints it in the daemon log). Requires a link.
+cmd_playit_address() {
+    local V="${1:-}" HOST PORT
+    case "$V" in
+        *:*)
+            HOST="${V%:*}"; PORT="${V##*:}"
+            [ -n "$HOST" ] || { state_set_error "playit-address: host vacío (formato host:puerto)"; exit 1; }
+            case "$PORT" in ''|*[!0-9]*) state_set_error "playit-address: puerto inválido (formato host:puerto)"; exit 1;; esac ;;
+        *) state_set_error "playit-address: formato host:puerto (ej. xxx.ply.gg:1234)"; exit 1 ;;
+    esac
+    [ "$(state_field .playit.secret)" = "true" ] || { state_set_error "playit-address: vincula primero el túnel"; exit 1; }
+    write_state ".playit.address = \"$V\" .playit.claimed = true .playit.manual = true .last_action = \"playit-address\" .last_error = null"
+    log "OK" "playit-address: $V (manual)"
+}
+
+# Dump redacted diagnostics for the in-app viewer (the embedded prefix has
+# no interactive shell, so this is the only way to look inside).
+cmd_playit_debug() {
+    local D="$SHARED/playit-debug.log" CLI
+    {
+        echo "== MCPanel playit-debug $(date -u +%FT%TZ 2>/dev/null || date) =="
+        CLI=$(playit_cli 2>/dev/null) && echo "playit-cli: $CLI" || echo "playit-cli: MISSING"
+        [ -n "${CLI:-}" ] && "$CLI" version 2>&1 || echo "cli version: n/a"
+        local DBIN; DBIN=$(playit_daemon_bin 2>/dev/null) && echo "playitd: $DBIN" || echo "playitd: MISSING"
+        echo "socket: $(ls "${PREFIX:-}/var/run/playitd.sock" 2>/dev/null || echo MISSING)"
+        echo "toml: $([ -f "$HOME_DIR/.config/playit_gg/playit.toml" ] && echo present || echo MISSING)"
+        tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null && echo "tmux session: yes" || echo "tmux session: no"
+        echo "--- playit-cli status ---"
+        [ -n "${CLI:-}" ] && "$CLI" status 2>&1 || echo "(status unavailable)"
+        echo "--- tunnel.log tail ---"
+        playit_clean_log "$TUNNEL_LOG" 2>/dev/null | tail -15
+    } > "$D" 2>/dev/null
+    # Defense in depth: never leave bare tokens in a shared-storage file.
+    sed -i '/^[0-9a-fA-F]\{64,\}$/d' "$D" 2>/dev/null || true
+    log "OK" "playit-debug: written"
 }
 
 cmd_playit_stop() {
@@ -998,6 +1066,8 @@ case "$CMD" in
     playit-claim)        cmd_playit_claim "$@" ;;
     playit-exchange)     cmd_playit_exchange "$@" ;;
     playit-unlink)       cmd_playit_unlink "$@" ;;
+    playit-address)      cmd_playit_address "$@" ;;
+    playit-debug)        cmd_playit_debug "$@" ;;
     server-delete)       cmd_server_delete "$@" ;;
     *) state_set_error "unknown command: ${CMD:-<none>}"; exit 1 ;;
 esac

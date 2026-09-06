@@ -78,6 +78,15 @@ case "$args" in
     echo "74f8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6509"
     exit 0 ;;
   *reset*) exit 0 ;;
+  *version*) echo "1.0.6" ;;
+  # status: forum-format block; silent unless MC_STATUS_SECRET is set, so
+  # legacy tests (no status mocking) see zero behavior change. Optional
+  # MC_STATUS_ADDR appends an extra line to exercise address plumbing.
+  *status*)
+    [ -z "${MC_STATUS_SECRET:-}" ] && exit 0
+    printf 'playit service status: Phase: running PID: 1 Uptime: 5 seconds Version: 1.0.6 Socket: /run/playit/playitd.sock Secret path: /etc/playit/playit.toml Secret configured: %s IPC version: 2\n' "$MC_STATUS_SECRET"
+    [ -n "${MC_STATUS_ADDR:-}" ] && printf 'tunnel %s\n' "$MC_STATUS_ADDR"
+    exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -99,7 +108,7 @@ if [ -f "$STATE" ]; then
   EXPECTED="$(printf '%s\n' installed last_action last_error loader playit port ram_max ram_min running started_at updated_at version | sort | paste -sd, -)"
   [ "$KEYS" = "$EXPECTED" ] && PASS "state.json schema exact" || FAIL "state keys: $KEYS"
   [ "$(jq -r '.port' "$STATE")" = 25565 ] && PASS "default port" || FAIL "default port"
-  [ "$(jq -r '.playit | keys | sort | join(",")' "$STATE")" = "address,claim_code,claim_url,claimed,needs_claim,running,secret" ] && PASS "playit schema" || FAIL "playit schema"
+  [ "$(jq -r '.playit | keys | sort | join(",")' "$STATE")" = "address,claim_code,claim_url,claimed,manual,needs_claim,running,secret" ] && PASS "playit schema" || FAIL "playit schema"
 else
   FAIL "state.json missing"
 fi
@@ -237,7 +246,7 @@ run playit-claim >/dev/null 2>&1
 MC_PLAYIT_SEED='your-server.gl.at.ply.gg:12345' run playit-exchange >/dev/null 2>&1
 run playit-start
 [ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start linked ok" || FAIL "playit-start linked"
-[ "$(jq -r '.playit.claim_code' "$STATE")" = "abc-def-123" ] && PASS "playit-start keeps claim code" || FAIL "playit-start claim kept"
+[ "$(jq -r '.playit.claim_code' "$STATE")" = null ] && PASS "playit-start keeps code cleared" || FAIL "playit-start code cleared"
 
 # unlink wipes link + claim state
 run playit-unlink
@@ -287,6 +296,48 @@ MC_CALLS="$TMP/calls" run playit-exchange
 [ ! -s "$TMP/calls" ] && PASS "playit-exchange locked skips CLI" || FAIL "playit-exchange locked CLI call"
 rm -rf "$MC_SHARED/.playit-exchange.lock" "$TMP/calls"
 run playit-unlink >/dev/null 2>&1
+rm -f "$MC_TMUX_MARKER"
+
+# ─── playit-cli status source + ANSI + manual address + debug ─────────
+# (stub stays silent unless MC_STATUS_SECRET is set → old tests unaffected)
+touch "$MC_TMUX_MARKER"
+printf '\x1b[32m INFO\x1b[0m agent registered id 7\nplain line\n' > "$MC_SHARED/tunnel.log"
+MC_STATUS_SECRET=true run playit-status
+[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "status Secret:true backfills link" || FAIL "status link backfill"
+[ "$(jq -r '.playit.address' "$STATE")" = null ] && PASS "status invents no address" || FAIL "status invented address"
+[ -f "$MC_SHARED/playit-status.log" ] && PASS "status snapshot saved" || FAIL "status snapshot"
+grep -q 'Secret configured: true' "$MC_SHARED/playit-status.log" && PASS "status snapshot content" || FAIL "status snapshot content"
+MC_STATUS_SECRET=false run playit-status
+[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "status Secret:false downgrades" || FAIL "status downgrade"
+# address plumbed through status output (same regexes, placement-agnostic)
+MC_STATUS_SECRET=true MC_STATUS_ADDR='a.joinmc.link:4321' run playit-status
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'joinmc.link:4321' && PASS "status address fallback" || FAIL "status address"
+rm -f "$MC_SHARED/playit-status.log"
+# manual address: set (needs link), preserved across digests, cleared on stop
+MC_STATUS_SECRET=true run playit-status >/dev/null 2>&1
+run playit-address 'srv.example.ply.gg:9999'
+[ "$?" -eq 0 ] && PASS "playit-address ok" || FAIL "playit-address exit"
+[ "$(jq -r '.playit.manual' "$STATE")" = true ] && PASS "playit-address sets manual" || FAIL "playit-address manual"
+run playit-status
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'srv.example.ply.gg:9999' && PASS "digest preserves manual" || FAIL "manual preserved"
+run playit-address 'sinsentido'
+[ "$?" -ne 0 ] && PASS "playit-address rejects no-port" || FAIL "playit-address no-port"
+run playit-address 'h:abc'
+[ "$?" -ne 0 ] && PASS "playit-address rejects bad-port" || FAIL "playit-address bad-port"
+run playit-stop >/dev/null 2>&1
+[ "$(jq -r '.playit.manual' "$STATE")" = false ] && PASS "stop clears manual" || FAIL "stop manual"
+[ "$(jq -r '.playit.address' "$STATE")" = null ] && PASS "stop clears manual address" || FAIL "stop manual address"
+# unlinked manual rejected
+run playit-unlink >/dev/null 2>&1
+run playit-address 'x.example.ply.gg:1'
+[ "$?" -ne 0 ] && PASS "playit-address rejects unlinked" || FAIL "playit-address unlinked"
+# debug dump without secrets
+printf '74f8bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb6509\n' >> "$MC_SHARED/tunnel.log"
+touch "$MC_TMUX_MARKER"
+run playit-debug
+[ -f "$MC_SHARED/playit-debug.log" ] && PASS "playit-debug written" || FAIL "playit-debug file"
+! grep -q '74f8bbb' "$MC_SHARED/playit-debug.log" && PASS "playit-debug redacts tokens" || FAIL "playit-debug token leak"
+grep -q 'playit-cli status' "$MC_SHARED/playit-debug.log" && PASS "playit-debug has status section" || FAIL "playit-debug status"
 rm -f "$MC_TMUX_MARKER"
 
 # ─── B1: RAM priority is flag > state.json > hardware preset ──────────

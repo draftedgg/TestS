@@ -42,10 +42,24 @@ flujo actual (sin pegar nada a mano):
    Luego espera la dirección publicada. El botón manual "Confirmar
    vinculación" (con la página abierta) ejecuta lo mismo sin espera.
 5. El usuario crea un Tunnel en `playit.gg/account/tunnels` apuntando al
-   puerto del servidor (`server-port`, default 25565). El daemon publica
-   la dirección y la app la lee de `state.json`.
-6. `playit-unlink` mata la sesión y corre `playit-cli reset` para poder
-   reclamar de cero.
+   puerto del servidor (`server-port`, default 25565).
+6. **Detección de la dirección** (probado en dispositivo: el log de v1.0.6
+   solo trae cháchara de control —`registered/keepalive/udp/auth`— y NUNCA
+   la dirección pública; el túnel funciona igual, con clientes reales
+   entrando):
+   - `playit_digest` pela ANSI del log y consulta `playit-cli status`
+     (formato real `Secret configured: true/false`, + snapshot a
+     `playit-status.log`); ese flag es la verdad del vínculo.
+   - Si ni log ni `status` la traen: fantasma condicional "Escribir
+     dirección" (solo vinculado+corriendo+sin dirección) → subcomando
+     `playit-address <host:puerto>` (validado, flag `manual`, respetado
+     por el digest y limpiado en `stop`/`unlink`/nuevo claim).
+   - `playit-debug` vuelca diagnóstico redactado a `playit-debug.log`
+     (versiones, socket, toml presente/ausente sin contenido, `status`,
+     cola del log sin tokens): es la única forma de mirar dentro del
+     prefijo embebido, que no tiene shell interactiva.
+7. `playit-unlink` mata la sesión y corre `playit-cli reset` para poder
+   reclamar de cero (además borra el toml).
 
 Los códigos caducan: cada `playit-start` sin vínculo genera uno nuevo.
 
