@@ -56,6 +56,24 @@ done
 [ -n "$out" ] && { mkdir -p "$(dirname "$out")"; printf 'PK\003\004fakejar' > "$out"; }
 EOF
 chmod +x "$STUB/wget"
+# playit-cli stub: claim generate|url|exchange, reset. Honors MC_PLAYIT_EXCHANGE_FAIL.
+cat > "$STUB/playit-cli" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+case "$args" in
+  *"claim generate"*) echo "abc-def-123" ;;
+  *"claim url"*) echo "https://playit.gg/claim/abc-def-123" ;;
+  *"claim exchange"*)
+    if [ "${MC_PLAYIT_EXCHANGE_FAIL:-0}" = "1" ]; then exit 1; fi
+    exit 0 ;;
+  *reset*) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$STUB/playit-cli"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/playitd"; chmod +x "$STUB/playitd"
+# transparent timeout: drop the duration arg, run the command as-is
+printf '#!/usr/bin/env bash\nshift; exec "$@"\n' > "$STUB/timeout"; chmod +x "$STUB/timeout"
 export PATH="$STUB:$PATH"
 run() { bash "$SCRIPT" "$@" >/dev/null 2>&1; }
 STATE="$MC_SHARED/state.json"
@@ -70,7 +88,7 @@ if [ -f "$STATE" ]; then
   EXPECTED="$(printf '%s\n' installed last_action last_error loader playit port ram_max ram_min running started_at updated_at version | sort | paste -sd, -)"
   [ "$KEYS" = "$EXPECTED" ] && PASS "state.json schema exact" || FAIL "state keys: $KEYS"
   [ "$(jq -r '.port' "$STATE")" = 25565 ] && PASS "default port" || FAIL "default port"
-  [ "$(jq -r '.playit | keys | sort | join(",")' "$STATE")" = "address,claimed,running,secret" ] && PASS "playit schema" || FAIL "playit schema"
+  [ "$(jq -r '.playit | keys | sort | join(",")' "$STATE")" = "address,claim_code,claim_url,claimed,needs_claim,running,secret" ] && PASS "playit schema" || FAIL "playit schema"
 else
   FAIL "state.json missing"
 fi
@@ -153,54 +171,52 @@ run playit-status
 [ "$(jq -r '.playit.running' "$STATE")" = false ] && PASS "playit stopped cleared" || FAIL "playit stopped cleared"
 [ "$(jq -r '.playit.address' "$STATE")" = null ] && PASS "playit stopped: address null" || FAIL "playit stopped: address null"
 
-# ─── playit-start: publishes ok, silence is an error (never silent OK)
-printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/playit"; chmod +x "$STUB/playit"
-# seed a secret so cmd_playit_start passes the prerequisite check
-mkdir -p "$MC_HOME/.config/playit_gg"
-printf 'secret = "playit_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n' > "$MC_HOME/.config/playit_gg/playit.toml"
-touch "$MC_TMUX_MARKER"
-MC_PLAYIT_SEED='https://playit.gg/claim/xyz-789-abc' run playit-start
-[ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start ok" || FAIL "playit-start ok"
-[ "$(jq -r '.last_error' "$STATE")" = null ] && PASS "playit-start no error" || FAIL "playit-start error"
-echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'claim/xyz-789-abc' && PASS "playit-start claim stored" || FAIL "playit-start claim stored"
-# Silence → cmd_playit_start exits 1 with the "no publicó" error after timeout
-MC_PLAYIT_SEED= MC_PLAYIT_WAIT=2 run playit-start
-[ "$?" -ne 0 ] && PASS "playit-start silence rejects" || FAIL "playit-start silence exit"
-echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no publicó\|no arrancó\|Crea un Tunnel' && PASS "playit-start silence recorded" || FAIL "playit-start silence error"
+# ─── playit claim flow (generate → url → exchange → linked) ─────────
 rm -f "$MC_TMUX_MARKER"
-# remove the seed toml so the secret-block tests below start from a clean state
-rm -f "$MC_HOME/.config/playit_gg/playit.toml"
+: > "$MC_SHARED/tunnel.log"
+run playit-claim
+[ "$?" -eq 0 ] && PASS "playit-claim ok" || FAIL "playit-claim exit"
+[ "$(jq -r '.playit.needs_claim' "$STATE")" = true ] && PASS "playit-claim sets needs_claim" || FAIL "playit-claim needs_claim"
+echo "$(jq -r '.playit.claim_url' "$STATE")" | grep -q 'playit.gg/claim/abc-def-123' && PASS "playit-claim stores url" || FAIL "playit-claim url"
+[ "$(jq -r '.playit.claim_code' "$STATE")" = "abc-def-123" ] && PASS "playit-claim stores code" || FAIL "playit-claim code"
+[ "$(jq -r '.last_error' "$STATE")" = null ] && PASS "playit-claim no error" || FAIL "playit-claim error"
 
-# ─── playit secret_key: save, missing, invalid, clear ─────────
-# bootstrap a working playit again
-printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/playit"; chmod +x "$STUB/playit"
-# without a saved secret, playit-start refuses with an actionable error
-touch "$MC_TMUX_MARKER"
-MC_PLAYIT_WAIT=1 run playit-start
-[ "$(jq -r '.last_error' "$STATE")" = "Falta secret_key de playit.gg. Abre Ajustes → Túnel playit.gg y pega tu secret_key (playit.gg/account/agents)." ] && \
-    PASS "playit-start rejects without secret" || \
-    FAIL "playit-start rejects without secret (got: $(jq -r '.last_error' "$STATE"))"
+# exchange without browser approval → retryable error, stays unlinked
+MC_PLAYIT_EXCHANGE_FAIL=1 run playit-exchange
+[ "$?" -ne 0 ] && PASS "playit-exchange timeout rejects" || FAIL "playit-exchange timeout exit"
+echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no se aprobó' && PASS "playit-exchange timeout recorded" || FAIL "playit-exchange timeout error"
+[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "playit-exchange timeout keeps unlinked" || FAIL "playit-exchange timeout link"
+
+# exchange approved → linked; seed an address so the chained wait resolves
+printf 'your-server.gl.at.ply.gg:12345\n' >> "$MC_SHARED/tunnel.log"
+run playit-exchange
+[ "$?" -eq 0 ] && PASS "playit-exchange ok" || FAIL "playit-exchange exit"
+[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "playit-exchange links" || FAIL "playit-exchange link"
+[ "$(jq -r '.playit.needs_claim' "$STATE")" = false ] && PASS "playit-exchange clears needs_claim" || FAIL "playit-exchange needs_claim"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'gl.at.ply.gg:12345' && PASS "playit-exchange publishes address" || FAIL "playit-exchange address"
+
+# linked start reuses the live session (no fresh claim minted)
+run playit-start
+[ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start linked ok" || FAIL "playit-start linked"
+[ "$(jq -r '.playit.claim_code' "$STATE")" = "abc-def-123" ] && PASS "playit-start keeps claim code" || FAIL "playit-start claim kept"
+
+# unlink wipes link + claim state
+run playit-unlink
+[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "playit-unlink clears secret" || FAIL "playit-unlink secret"
+[ "$(jq -r '.playit.claim_url' "$STATE")" = null ] && PASS "playit-unlink clears claim" || FAIL "playit-unlink claim"
+[ "$(jq -r '.last_action' "$STATE")" = "playit-unlink" ] && PASS "playit-unlink action" || FAIL "playit-unlink action"
+
+# exchange with no pending claim → actionable error (no daemon needed)
+run playit-exchange
+[ "$?" -ne 0 ] && PASS "playit-exchange no-claim rejects" || FAIL "playit-exchange no-claim exit"
+echo "$(jq -r '.last_error' "$STATE")" | grep -q 'no hay claim pendiente' && PASS "playit-exchange no-claim recorded" || FAIL "playit-exchange no-claim error"
+
+# unlinked start mints a FRESH claim (never an error)
+run playit-start
+[ "$?" -eq 0 ] && PASS "playit-start unlinked ok" || FAIL "playit-start unlinked exit"
+[ "$(jq -r '.playit.needs_claim' "$STATE")" = true ] && PASS "playit-start unlinked needs_claim" || FAIL "playit-start unlinked needs_claim"
+[ "$(jq -r '.last_action' "$STATE")" = "playit-claim" ] && PASS "playit-start delegates to claim" || FAIL "playit-start delegates"
 rm -f "$MC_TMUX_MARKER"
-
-# save a valid-looking key and confirm state + file
-run playit-secret "playit_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" 2>&1
-[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "playit-secret sets state" || FAIL "playit-secret sets state"
-TOML="$MC_HOME/.config/playit_gg/playit.toml"
-grep -q '^secret[[:space:]]*=[[:space:]]*"playit_aaaa' "$TOML" && PASS "playit-secret wrote toml" || FAIL "playit-secret wrote toml"
-[ "$(stat -c %a "$TOML" 2>/dev/null || stat -f %p "$TOML")" = "600" ] && PASS "playit-secret 600 perms" || PASS "playit-secret 600 perms (skipped on non-unix)"
-
-# invalid key rejected
-run playit-secret "lol-not-a-key"
-[ "$(jq -r '.last_error' "$STATE")" = "playit-secret: formato inválido" ] && PASS "playit-secret rejects garbage" || FAIL "playit-secret rejects garbage"
-
-# now start succeeds (with seed)
-MC_PLAYIT_SEED='https://playit.gg/claim/abc-def-456' run playit-start
-[ "$(jq -r '.last_action' "$STATE")" = "playit-start" ] && PASS "playit-start succeeds with secret" || FAIL "playit-start succeeds with secret"
-
-# clear
-run playit-secret-clear
-[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "playit-secret-clear unsets state" || FAIL "playit-secret-clear unsets state"
-[ ! -f "$TOML" ] && PASS "playit-secret-clear removes toml" || FAIL "playit-secret-clear removes toml"
 
 # ─── B1: RAM priority is flag > state.json > hardware preset ──────────
 unset MC_JAVA_PID 2>/dev/null

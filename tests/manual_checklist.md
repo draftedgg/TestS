@@ -21,7 +21,7 @@
 - [ ] Búsqueda Modrinth devuelve resultados compatibles.
 - [ ] Mod/plugin instalado aparece en `mods/` o `plugins/`.
 - [ ] Eliminación de mod funciona.
-- [ ] playit inicia y muestra estado/claim.
+- [ ] playit: Iniciar túnel genera claim_url, Abrir enlace lo muestra, aprobar en navegador + "Ya lo aprobé" vincula, dirección pública aparece, crear Tunnel en dashboard apunta al puerto.
 - [ ] Backup crea y lista `tar.gz`.
 - [ ] Eliminación del servidor exige doble confirmación en la UI final.
 - [ ] APK release y tamaño medidos.

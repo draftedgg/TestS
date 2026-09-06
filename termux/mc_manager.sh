@@ -11,7 +11,7 @@
 #   start | stop | restart | status | send <cmd> | backup
 #   mod-install <file-in-inbox> | mod-remove <name>
 #   prop <key> <value> [key value ...] | ram-set <min> <max>
-#   playit-start | playit-stop | playit-status | playit-secret <key> | playit-secret-clear
+#   playit-start | playit-stop | playit-status | playit-claim | playit-exchange | playit-unlink
 #   server-delete
 # ══════════════════════════════════════════════════════════════════════
 set -u
@@ -232,9 +232,9 @@ write_state() { # $1..= jq update expr, e.g. '.running = true' or '.a = 1 | .b =
     local merge="$1"
     # jq requires '|' between separate update expressions. Normalize the
     # space-joined field-update convention used by this script.
-    merge=$(printf '%s' "$merge" | sed -E 's/[[:space:]]+\.(last_action|last_error|loader|version|ram_min|ram_max|running|started_at|installed|port|playit\.running)([[:space:]]*=)/ | .\1\2/g')
+    merge=$(printf '%s' "$merge" | sed -E 's/[[:space:]]+\.(last_action|last_error|loader|version|ram_min|ram_max|running|started_at|installed|port|playit\.running|playit\.secret|playit\.claim_url|playit\.claim_code|playit\.needs_claim|playit\.claimed|playit\.address)([[:space:]]*=)/ | .\1\2/g')
     local ts; ts=$(now_ms)
-    local base='{"installed":false,"loader":null,"version":null,"ram_min":null,"ram_max":null,"running":false,"started_at":null,"port":25565,"playit":{"running":false,"claimed":false,"address":null},"last_action":null,"last_error":null,"updated_at":0}'
+    local base='{"installed":false,"loader":null,"version":null,"ram_min":null,"ram_max":null,"running":false,"started_at":null,"port":25565,"playit":{"running":false,"claimed":false,"address":null,"secret":false,"claim_url":null,"claim_code":null,"needs_claim":false},"last_action":null,"last_error":null,"updated_at":0}'
     # PID-scoped temp file: the keep-alive service may refresh state.json
     # in the background while a command writes it. A shared tmp path would
     # let two writers clobber each other mid-write; this keeps them apart.
@@ -691,13 +691,61 @@ cmd_ram_set() {
 
 # Detect the claim URL / public address from the agent log so the app can
 # show the user what to do (open claim link, then copy the address).
+# Resolve the playit-cli orchestrator (TUR package ships it next to playitd).
+# Falls back to $PREFIX/bin for prefixes whose PATH is minimal.
+playit_cli() {
+    local c
+    c=$(command -v playit-cli 2>/dev/null) && [ -x "$c" ] && { echo "$c"; return 0; }
+    [ -x "${PREFIX:-}/bin/playit-cli" ] && { echo "${PREFIX:-}/bin/playit-cli"; return 0; }
+    return 1
+}
+
+# Resolve the playitd daemon binary the same way.
+playit_daemon_bin() {
+    local c
+    c=$(command -v playitd 2>/dev/null) && [ -x "$c" ] && { echo "$c"; return 0; }
+    [ -x "${PREFIX:-}/bin/playitd" ] && { echo "${PREFIX:-}/bin/playitd"; return 0; }
+    # very old distros only shipped a bare `playit` agent
+    c=$(command -v playit 2>/dev/null) && [ -x "$c" ] && { echo "$c"; return 0; }
+    return 1
+}
+
+# Ensure the daemon tmux session exists. An unclaimed v1.0.x daemon simply
+# waits for frontend secret provisioning over IPC — that is the designed
+# claim flow, not an error, so starting it is always safe.
+playit_ensure_daemon() {
+    tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null && return 0
+    local DAEMON; DAEMON=$(playit_daemon_bin) || { state_set_error "playit: no se encontró playitd (reinstala el paquete playit)"; return 1; }
+    : > "$TUNNEL_LOG" 2>/dev/null || true
+    local AGENT_PREFIX=""
+    command -v stdbuf >/dev/null 2>&1 && AGENT_PREFIX="stdbuf -o0 -e0 "
+    tmux new-session -d -s "$PLAYIT_SESSION" "${AGENT_PREFIX}$DAEMON >> '$TUNNEL_LOG' 2>&1" || return 1
+    sleep 1
+    return 0
+}
+
+# Wait (up to $1 seconds, default 30) until playit_digest sees an address.
+# Test hook: MC_PLAYIT_WAIT overrides the budget.
+playit_wait_address() {
+    local WAIT="${MC_PLAYIT_WAIT:-${1:-30}}"
+    local i=0 A
+    while [ $i -lt "$WAIT" ]; do
+        sleep 1; i=$((i + 1))
+        if ! tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then
+            playit_digest
+            state_set_error "playit se cerró solo (revisa la conexión y reintenta)"
+            return 1
+        fi
+        playit_digest
+        A=$(state_field .playit.address)
+        [ "$A" != "null" ] && [ -n "$A" ] && return 0
+    done
+    return 1
+}
+
 playit_digest() {
-    local RUN=false CLAIM="" ADDR="" SECRET=false
+    local RUN=false CLAIM="" ADDR=""
     tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null && RUN=true
-    # A saved secret is the prerequisite for v1.0.x to connect.
-    [ -s "$HOME_DIR/.config/playit_gg/playit.toml" ] && \
-        grep -qE '^secret[[:space:]]*=' "$HOME_DIR/.config/playit_gg/playit.toml" 2>/dev/null && \
-        SECRET=true
     # Only meaningful while the agent is up: a stopped session means no
     # tunnel, so the app must not keep showing a stale claim/address.
     if [ "$RUN" = "true" ]; then
@@ -712,108 +760,112 @@ playit_digest() {
             ADDR=$(grep -oE '(tcp|udp|https?)://[^[:space:]]+|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.(at\.ply\.gg|ply\.gg|playit\.gg|joinmc\.link)(:[0-9]+)?' "$TUNNEL_LOG" 2>/dev/null | grep -v '/claim/' | sed -e 's/[.,;:!?)]*$//' | tail -1)
         fi
     fi
-    local upd=".playit.running = $RUN | .playit.secret = $SECRET"
+    # Preserve the claim-flow + link fields: only claim/exchange/unlink touch
+    # them, so a periodic digest must re-emit what is already stored (this
+    # also backfills the keys on states written before they existed).
+    local S CU CC NC SJ CUJ CCJ NCJ
+    S=$(state_field .playit.secret); CU=$(state_field .playit.claim_url)
+    CC=$(state_field .playit.claim_code); NC=$(state_field .playit.needs_claim)
+    [ "$S" = "true" ] && SJ=true || SJ=false
+    { [ "$CU" = "null" ] || [ -z "$CU" ]; } && CUJ=null || CUJ="\"$CU\""
+    { [ "$CC" = "null" ] || [ -z "$CC" ]; } && CCJ=null || CCJ="\"$CC\""
+    [ "$NC" = "true" ] && NCJ=true || NCJ=false
+    local upd=".playit.running = $RUN .playit.secret = $SJ .playit.claim_url = $CUJ .playit.claim_code = $CCJ .playit.needs_claim = $NCJ"
     # address wins over claim: after the user claims, the log keeps the old
     # claim line, so preferring claim would hide the ready address forever.
     if [ -n "$ADDR" ]; then
-        upd="$upd | .playit.claimed = true  | .playit.address = \"$ADDR\""
+        upd="$upd .playit.claimed = true .playit.address = \"$ADDR\""
     elif [ -n "$CLAIM" ]; then
-        upd="$upd | .playit.claimed = false | .playit.address = \"$CLAIM\""
+        upd="$upd .playit.claimed = false .playit.address = \"$CLAIM\""
     else
-        upd="$upd | .playit.claimed = null  | .playit.address = null"
+        upd="$upd .playit.claimed = null .playit.address = null"
     fi
     write_state "$upd"
 }
 
 cmd_playit_start() {
     # auto-install the agent if it is missing (first run may have had no net)
-    if ! command -v playit >/dev/null 2>&1 && ! command -v playitd >/dev/null 2>&1; then
+    if ! playit_daemon_bin >/dev/null 2>&1 && ! playit_cli >/dev/null 2>&1; then
         log "INF" "playit-start: agente no instalado, instalando…"
         pkg install -y tur-repo >> "$INSTALL_LOG" 2>&1 || true
         pkg update -y >> "$INSTALL_LOG" 2>&1 || true
         pkg install -y playit >> "$INSTALL_LOG" 2>&1 || log "ERR" "playit-start: la instalación del agente falló"
     fi
-    command -v playit  >/dev/null 2>&1 && PLAYIT_BIN="playit"
-    command -v playitd >/dev/null 2>&1 && PLAYIT_BIN="playitd"
-    if [ -z "$PLAYIT_BIN" ]; then
+    if ! playit_daemon_bin >/dev/null 2>&1; then
         state_set_error "No se pudo iniciar playit: el agente no se instaló (revisa la conexión e inténtalo otra vez)"
         exit 1
     fi
-    # v1.0.x rejects to start without a secret_key unless it's already in
-    # ~/.config/playit_gg/playit.toml (legacy) or supplied via a frontend IPC.
-    # We require the secret in the toml file. The app's "Túnel playit.gg"
-    # dialog writes it via cmd_playit_secret.
-    if [ ! -s "$HOME_DIR/.config/playit_gg/playit.toml" ] || \
-       ! grep -qE '^secret[[:space:]]*=' "$HOME_DIR/.config/playit_gg/playit.toml" 2>/dev/null; then
-        state_set_error "Falta secret_key de playit.gg. Abre Ajustes → Túnel playit.gg y pega tu secret_key (playit.gg/account/agents)."
+    # Not linked yet: generate a fresh claim and let the app show it.
+    # Claim codes expire, so every unlinked start mints a new one.
+    if [ "$(state_field .playit.secret)" != "true" ]; then
+        cmd_playit_claim
+        return 0
+    fi
+    # Linked: reuse a live session, else boot a fresh one.
+    if ! tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then
+        tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
+        playit_ensure_daemon || exit 1
+    fi
+    if playit_wait_address; then
+        write_state '.last_action = "playit-start" .last_error = null'
+        log "OK" "playit-start: session up"
+    else
+        # The daemon is up and linked but published nothing. Most common
+        # reason: no Tunnel exists yet in the playit.gg dashboard (free-tier
+        # requirement) — that mapping is manual and outside our control.
+        state_set_error "playit arrancó pero no publicó ningún enlace. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
         exit 1
     fi
-    tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
-    : > "$TUNNEL_LOG" 2>/dev/null || true
-    # stdbuf avoids block-buffering when stdout goes to a file (the daemon
-    # otherwise may sit in its IPC loop forever and the digest sees an empty log)
-    local AGENT_PREFIX=""
-    command -v stdbuf >/dev/null 2>&1 && AGENT_PREFIX="stdbuf -o0 -e0 "
-    tmux new-session -d -s "$PLAYIT_SESSION" "${AGENT_PREFIX}$PLAYIT_BIN >> '$TUNNEL_LOG' 2>&1"
-    # Give the daemon time to come up and fetch its tunnel from playit.gg's API.
-    # With a valid secret this is usually 2-5 s; without one the daemon exits
-    # within the first second ("no agent registered") and we surface that fast.
-    local WAIT="${MC_PLAYIT_WAIT:-30}"
-    local i=0 A
-    while [ $i -lt "$WAIT" ]; do
-        sleep 1; i=$((i + 1))
-        if ! tmux has-session -t "$PLAYIT_SESSION" 2>/dev/null; then
-            playit_digest
-            state_set_error "playit se cerró solo al arrancar (revisa la conexión, que el secret_key sea válido y que el agent exista en playit.gg/account/agents)"
+}
+
+# Generate a fresh claim code + browser URL for linking this agent.
+# The daemon must be up first: exchange provisions the secret to the
+# running daemon over IPC ("Waiting for frontend secret provisioning").
+cmd_playit_claim() {
+    local CLI; CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; exit 1; }
+    playit_ensure_daemon || exit 1
+    local CODE URL
+    CODE=$("$CLI" --stdout claim generate 2>>"$INSTALL_LOG" | tr -d '[:space:]')
+    [ -z "$CODE" ] && { state_set_error "playit: no se pudo generar el código (revisa la conexión)"; exit 1; }
+    URL=$("$CLI" --stdout claim url "$CODE" 2>>"$INSTALL_LOG" | tr -d '[:space:]')
+    [ -z "$URL" ] && URL="https://playit.gg/claim/$CODE"
+    write_state ".playit.claim_url = \"$URL\" .playit.claim_code = \"$CODE\" .playit.needs_claim = true .last_action = \"playit-claim\" .last_error = null"
+    log "OK" "playit-claim: $URL"
+}
+
+# Exchange an approved claim for the linked secret. Blocks (up to ~90s)
+# waiting for the browser approval; the secret goes straight to the
+# running daemon over IPC and is never printed, logged or stored here.
+cmd_playit_exchange() {
+    local CLI; CLI=$(playit_cli) || { state_set_error "playit: falta playit-cli (reinstala el paquete playit)"; exit 1; }
+    local CODE; CODE=$(state_field .playit.claim_code | sed 's/^null$//')
+    [ -z "$CODE" ] && { state_set_error "playit: no hay claim pendiente (pulsa Iniciar túnel)"; exit 1; }
+    playit_ensure_daemon || exit 1
+    log "INF" "playit-exchange: esperando aprobación en el navegador…"
+    if timeout 150 "$CLI" --stdout claim exchange --wait 90 "$CODE" >>"$INSTALL_LOG" 2>&1; then
+        write_state ".playit.secret = true .playit.needs_claim = false .last_action = \"playit-exchange\" .last_error = null"
+        log "OK" "playit-exchange: agent vinculado"
+        if playit_wait_address; then
+            write_state '.last_action = "playit-exchange" .last_error = null'
+            log "OK" "playit-exchange: address published"
+        else
+            state_set_error "playit vinculado pero sin dirección. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
             exit 1
         fi
-        playit_digest
-        A=$(state_field .playit.address)
-        [ "$A" != "null" ] && [ -n "$A" ] && break
-    done
-    A=$(state_field .playit.address)
-    if [ "$A" = "null" ] || [ -z "$A" ]; then
-        # The daemon didn't publish an address. Most common reason: the
-        # secret_key is valid but the user hasn't created a Tunnel in the
-        # playit.gg dashboard yet (this is the free-tier requirement).
-        state_set_error "playit arrancó pero no publicó ningún enlace. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto ${port:-25565} (estado tiene claim_url si aún no has reclamado)"
+    else
+        state_set_error "playit: no se aprobó a tiempo (abre el enlace y pulsa Iniciar túnel para generar uno nuevo)"
         exit 1
     fi
-    write_state '.last_action = "playit-start" .last_error = null'
-    log "OK" "playit-start: session up"
 }
 
-# Save the user's playit.gg secret_key into the daemon's config file and
-# record that fact in state.json (without ever exposing the key).
-cmd_playit_secret() {
-    local KEY="${1:-}"
-    # playit secrets look like "playit_<38-44 base64url chars>"; allow either
-    # the unprefixed form (some dashboards copy just the suffix) or the
-    # already-prefixed form.
-    case "$KEY" in
-        playit_*|p_*[A-Za-z0-9_-]) ;;
-        *) state_set_error "playit-secret: formato inválido"; exit 1 ;;
-    esac
-    mkdir -p "$HOME_DIR/.config/playit_gg"
-    local F="$HOME_DIR/.config/playit_gg/playit.toml"
-    if [ -f "$F" ]; then
-        # preserve any other keys (e.g. an account_id set previously)
-        sed -i.bak -E "s|^secret[[:space:]]*=.*|secret = \"$KEY\"|" "$F" 2>/dev/null || \
-            printf 'secret = "%s"\n' "$KEY" >> "$F"
-        rm -f "$F.bak"
-    else
-        printf 'secret = "%s"\n' "$KEY" > "$F"
-    fi
-    chmod 600 "$F"
-    write_state ".playit.secret = true .last_action = \"playit-secret\" .last_error = null"
-    log "OK" "playit-secret: saved (length=${#KEY})"
-}
-
-# Delete the saved secret so a fresh setup can happen.
-cmd_playit_secret_clear() {
-    rm -f "$HOME_DIR/.config/playit_gg/playit.toml"
-    write_state '.playit.secret = false .last_action = "playit-secret-clear" .last_error = null'
-    log "OK" "playit-secret-clear: removed"
+# Unlink this agent: stop the tunnel and drop the provisioned secret so the
+# agent can be claimed again from scratch.
+cmd_playit_unlink() {
+    tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
+    local CLI; CLI=$(playit_cli 2>/dev/null) && "$CLI" reset >>"$INSTALL_LOG" 2>&1 || true
+    playit_digest
+    write_state '.playit.secret = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
+    log "OK" "playit-unlink: desvinculado"
 }
 
 cmd_playit_stop() {
@@ -855,8 +907,9 @@ case "$CMD" in
     playit-start)        cmd_playit_start "$@" ;;
     playit-stop)         cmd_playit_stop "$@" ;;
     playit-status)       cmd_playit_status "$@" ;;
-    playit-secret)       cmd_playit_secret "$@" ;;
-    playit-secret-clear) cmd_playit_secret_clear "$@" ;;
+    playit-claim)        cmd_playit_claim "$@" ;;
+    playit-exchange)     cmd_playit_exchange "$@" ;;
+    playit-unlink)       cmd_playit_unlink "$@" ;;
     server-delete)       cmd_server_delete "$@" ;;
     *) state_set_error "unknown command: ${CMD:-<none>}"; exit 1 ;;
 esac

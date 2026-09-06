@@ -36,14 +36,15 @@ Resultado: el preset por RAM física siempre gana; el botón "Cambiar RAM" (ram-
 - [x] `mod-install` borra el jar inválido del inbox (`mc_manager.sh:609`) — mejor conservarlo y solo avisar — renombra a `.invalid`.
 - [x] `clearError()` de la app reescribe state.json compitiendo con el script (`MainActivity.kt:327`) — frágil pero autocorrige.
 
-### Túnel playit v1.0.x — flujo nuevo (commit posterior)
-- [x] Scraping de stdout obsoleto: el daemon solo espera `secret_key` en `playit.toml` (`mc_manager.sh:cmd_playit_start`).
-- [x] Nuevo subcomando `playit-secret <key>` que guarda en `$HOME/.config/playit_gg/playit.toml` con permisos 600.
-- [x] Nuevo subcomando `playit-secret-clear` para reset.
-- [x] Estado `state.json`: nueva clave `playit.secret = true|false` (sin guardar el valor del secret).
-- [x] App: sección "Túnel playit.gg" en Ajustes con diálogo de pegado del secret.
-- [x] App: botón "Iniciar túnel playit.gg" en Inicio detecta falta de secret y abre el diálogo en vez de fallar ciegamente.
-- [x] Tests: 5 nuevos (sin secret → error, guardar → state + toml + 600, inválido → rechazado, con secret → arranca, clear → elimina toml).
+### Túnel playit v1.0.x — flujo claim vía playit-cli (corrige el modelo secret-pegado)
+- [x] El flujo "pegar secret_key del dashboard" no existe en playit.gg: el claim ES lo que crea el agent. Revertido entero.
+- [x] El paquete TUR instala `playit-cli` junto a `playitd`: `claim generate` → código, `claim url` → URL, `claim exchange --wait` → secreto por IPC al daemon (nunca impreso/logueado/guardado).
+- [x] Nuevos subcomandos `playit-claim` (genera y guarda URL+código, sale 0) y `playit-exchange` (espera aprobación hasta ~90s y encadena espera de dirección).
+- [x] `playit-start` sin vínculo genera claim fresco (regenerar-siempre: los códigos caducan); vinculado asegura daemon y espera dirección.
+- [x] Nuevo `playit-unlink` (mata sesión + `playit-cli reset` + limpia campos). Borrados `playit-secret`/`playit-secret-clear` y todo rastro de `playit.toml`.
+- [x] Estado: `playit.claim_url`, `playit.claim_code`, `playit.needs_claim`; `playit.secret` = vinculado-tras-exchange.
+- [x] App: rama claim en Inicio (URL + Abrir enlace + "Ya lo aprobé, continuar"), Ajustes Vincular/Desvincular, diálogo de pegado borrado, watcher con claim en la firma.
+- [x] Tests: stub playit-cli/playitd/timeout + ~15 casos del flujo (claim, exchange ok/timeout/sin-pendiente, start vinculado/sin-vínculo, unlink).
 
 ## 3. Documentación (drift con el código)
 - [ ] README/REPORT aún describen el **modo Termux externo** (intents `com.termux.RUN_COMMAND`, `allow-external-apps=true`); la app 0.12 es 100 % embebida (`Embed.runManager`, ProcessBuilder interno).

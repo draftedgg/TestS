@@ -494,6 +494,8 @@ class MainActivity : Activity() {
         val pAddr = playit?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" }
         val claimed = pAddr != null && !pAddr.startsWith("http")
         val claimUrl = pAddr?.takeIf { !claimed }
+        val stateClaimUrl = playit?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" }
+        val needsClaim = playit?.optBoolean("needs_claim") == true
 
         // ── servidor ──
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -530,6 +532,17 @@ class MainActivity : Activity() {
                     LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
                 col.addBtn("Abrir enlace", Style.SECONDARY, height = 44f, marginTop = 8f) { open(claimUrl) }
             }
+            needsClaim && stateClaimUrl != null -> {
+                col.addView(tv(stateClaimUrl, 13f, ACCENT, mono = true).apply { setTextIsSelectable(true) },
+                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
+                col.addBtn("Abrir enlace", Style.SECONDARY, height = 44f, marginTop = 8f) { open(stateClaimUrl) }
+                col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Ya lo aprobé, continuar", Style.GHOST, height = 44f,
+                    marginTop = 4f, enabled = !tunnelBusy) {
+                    if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
+                    runWithBusy("tunnel", "Vinculando…", { runTermux("playit-exchange") },
+                        { readState()?.optJSONObject("playit")?.optBoolean("needs_claim") != true })
+                }
+            }
             pRunning -> {
                 val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
                 row.addView(spinner(), LinearLayout.LayoutParams(px(20f), px(20f)))
@@ -549,9 +562,6 @@ class MainActivity : Activity() {
                 col.addBtn(if (tunnelBusy) (busyText ?: "…") else "Iniciar túnel playit.gg", Style.GHOST, height = 44f,
                     marginTop = 8f, enabled = !tunnelBusy) {
                     if (actionBusy) { toast("Espera a que termine la acción actual."); return@addBtn }
-                    val st = readState()
-                    val hasSecret = st?.optJSONObject("playit")?.optBoolean("secret") == true
-                    if (!hasSecret) { openPlayitSecretDialog(); return@addBtn }
                     runWithBusy("tunnel", "Iniciando túnel…", { runTermux("playit-start") },
                         { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
                 }
@@ -578,7 +588,9 @@ class MainActivity : Activity() {
             val r = st?.optBoolean("running") == true
             val p = st?.optJSONObject("playit")?.optBoolean("running") == true
             val a = st?.optJSONObject("playit")?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
-            return "$r|$p|$a|${sval(st, "last_error")}|$actionBusy"
+            val c = st?.optJSONObject("playit")?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
+            val n = st?.optJSONObject("playit")?.optBoolean("needs_claim") == true
+            return "$r|$p|$a|$c|$n|${sval(st, "last_error")}|$actionBusy"
         }
         var last = curSig()
         while (isActive) {
@@ -871,30 +883,28 @@ class MainActivity : Activity() {
 
         // ── túnel playit.gg ──
         section("Túnel playit.gg")
-        val hasSecret = st.optJSONObject("playit")?.optBoolean("secret") == true
-        col.addView(tv(if (hasSecret) "Configurado" else "Sin configurar", 14f, if (hasSecret) ACCENT else MUTED, bold = true),
+        val linked = st.optJSONObject("playit")?.optBoolean("secret") == true
+        col.addView(tv(if (linked) "Vinculado" else "Sin vincular", 14f, if (linked) ACCENT else MUTED, bold = true),
             LinearLayout.LayoutParams(-1, -2))
-        if (!hasSecret) {
-            col.addView(tv("Crea una cuenta en playit.gg y genera un agent (Account → Agents). Pega el secret_key abajo.", 12f, MUTED),
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f); bottomMargin = px(8f) })
-            col.addBtn("Configurar secret_key", Style.SECONDARY, height = 44f, marginTop = 2f) { openPlayitSecretDialog() }
+        if (!linked) {
+            col.addBtn("Vincular con playit.gg", Style.SECONDARY, height = 44f, marginTop = 8f) {
+                runTermux("playit-start")
+                toast("Generando enlace…")
+                scope.launch { delay(2500); if (tab == Tab.SETTINGS) render() }
+            }
         } else {
-            col.addView(tv("El daemon usará este secret. Tras iniciarlo, crea un Tunnel en playit.gg/account/tunnels apuntando al puerto ${serverPort(st)}.", 12f, MUTED),
+            col.addView(tv("Tras iniciarlo, crea un Tunnel en playit.gg/account/tunnels apuntando al puerto ${serverPort(st)}.", 12f, MUTED),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f); bottomMargin = px(8f) })
-            col.addBtn("Cambiar secret_key", Style.SECONDARY, height = 44f, marginTop = 2f) { openPlayitSecretDialog() }
-            col.addBtn("Quitar secret_key", Style.GHOST, height = 40f, marginTop = 4f) {
-                AlertDialog.Builder(this).setTitle("Quitar secret_key")
-                    .setMessage("El daemon no podrá iniciar hasta que pegues uno nuevo.")
+            col.addBtn("Desvincular", Style.GHOST, height = 40f, marginTop = 2f) {
+                AlertDialog.Builder(this).setTitle("Desvincular túnel")
+                    .setMessage("El túnel dejará de funcionar hasta que lo vincules de nuevo.")
                     .setNegativeButton("Cancelar", null)
-                    .setPositiveButton("Quitar") { _, _ ->
-                        runTermux("playit-secret-clear")
-                        toast("Secret_key quitado.")
+                    .setPositiveButton("Desvincular") { _, _ ->
+                        runTermux("playit-unlink")
+                        toast("Túnel desvinculado.")
                         scope.launch { delay(1500); render() }
                     }.show()
             }
-        }
-        col.addBtn("Abrir playit.gg/account/agents", Style.GHOST, height = 40f, marginTop = 6f) {
-            open("https://playit.gg/account/agents")
         }
 
         // ── respaldos ──
@@ -1025,43 +1035,6 @@ class MainActivity : Activity() {
                 runTermux("prop", *pairs.toTypedArray())
                 toast("Guardado: aplica al reiniciar el servidor.")
             }.show()
-    }
-
-    // ── diálogo: secret_key de playit.gg ──────────────────────────────
-    private fun openPlayitSecretDialog() {
-        val input = EditText(this).apply {
-            hint = "playit_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-            setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
-            setBackgroundColor(Color.TRANSPARENT)
-            background = rounded(SURFACE, 12f, STROKE, 1)
-            setPadding(px(12f), 0, px(12f), 0)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setSingleLine(true)
-        }
-        val wrap = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f))
-            addView(input, LinearLayout.LayoutParams(-1, px(46f)))
-            addView(tv("Se guarda en playit.toml con permisos 600. Nunca se muestra completo en pantalla.", 11.5f, FAINT),
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
-        }
-        AlertDialog.Builder(this)
-            .setTitle("secret_key de playit.gg")
-            .setView(ScrollView(this).apply { addView(wrap) })
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Guardar") { _, _ ->
-                val key = input.text.toString().trim()
-                if (key.length < 16) {
-                    toast("secret_key demasiado corto (mínimo 16 caracteres).")
-                    return@setPositiveButton
-                }
-                runTermux("playit-secret", key)
-                toast("Secret guardado.")
-                scope.launch { delay(1500); render() }
-            }
-            .setNeutralButton("Generar nuevo") { _, _ ->
-                open("https://playit.gg/account/agents")
-            }
-            .show()
     }
 
     // ── batería ───────────────────────────────────────────────────────
