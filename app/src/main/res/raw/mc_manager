@@ -810,6 +810,11 @@ playit_digest() {
     else
         upd="$upd .playit.claimed = null .playit.address = null"
     fi
+    # B3: a real address means the tunnel is alive and reachable — any
+    # stale "vinculado pero sin dirección" error is obsolete by definition.
+    if [ "$RUN" = "true" ] && [ -n "$ADDR" ]; then
+        upd="$upd .last_error = null"
+    fi
     write_state "$upd"
 }
 
@@ -851,6 +856,8 @@ cmd_playit_start() {
             fi
             RC=0; playit_do_exchange "$CODE2" || RC=$?
             playit_exchange_unlock
+            # rc=2: linked, address pending — success (B3).
+            [ $RC -eq 2 ] && exit 0
             [ $RC -eq 0 ] || exit 1
         fi
         return 0
@@ -945,13 +952,18 @@ playit_do_exchange() {
     tmux new-session -d -s "$PLAYIT_SESSION" "${AGENT_PREFIX}$DAEMON --secret-path '$HOME_DIR/.config/playit_gg/playit.toml' >> '$TUNNEL_LOG' 2>&1" || { state_set_error "playit: no se pudo relanzar el daemon"; return 1; }
         write_state ".playit.secret = true .playit.needs_claim = false .playit.claim_code = null .last_action = \"playit-exchange\" .last_error = null"
     log "OK" "playit-exchange: agent vinculado"
+    # B3: linking succeeded — that is a success in itself. Whether an address
+    # has propagated yet is a separate, later concern: the digest clears
+    # last_error the moment a real address shows up, so the UI must not
+    # carry a stale "sin dirección" message (it renders as a false error).
     if playit_wait_address; then
         write_state '.last_action = "playit-exchange" .last_error = null'
         log "OK" "playit-exchange: address published"
         return 0
     fi
-    state_set_error "playit vinculado pero sin dirección. Crea un Tunnel en playit.gg/account/tunnels apuntando al puerto $(state_field .port 2>/dev/null | sed 's/^null$/25565/')"
-    return 1
+    write_state '.last_action = "playit-vinculado" .last_error = null'
+    log "INF" "playit-exchange: vinculado; sin dirección todavía"
+    return 2
 }
 
 # Exchange an approved claim for the linked secret. Manual entry point
@@ -972,6 +984,8 @@ cmd_playit_exchange() {
     fi
     RC=0; playit_do_exchange "$CODE" || RC=$?
     playit_exchange_unlock
+    # rc=2: linked, address still pending — success for the caller (B3).
+    [ $RC -eq 2 ] && exit 0
     [ $RC -eq 0 ] || exit 1
 }
 
@@ -990,12 +1004,24 @@ cmd_playit_unlink() {
 # see it: v1.0.6 never prints it in the daemon log). Requires a link.
 cmd_playit_address() {
     local V="${1:-}" HOST PORT
+    # B2: accept `host`, `host:puerto` and pasted URLs (`https://host[:puerto]/...`).
+    # Strip everything up to and including '://' first, then trailing path.
+    V="${V#*://}"
+    V="${V%%/*}"
+    V="${V%%\?*}"
+    [ -n "$V" ] || { state_set_error "playit-address: vacío (formato host o host:puerto)"; exit 1; }
     case "$V" in
         *:*)
             HOST="${V%:*}"; PORT="${V##*:}"
-            [ -n "$HOST" ] || { state_set_error "playit-address: host vacío (formato host:puerto)"; exit 1; }
-            case "$PORT" in ''|*[!0-9]*) state_set_error "playit-address: puerto inválido (formato host:puerto)"; exit 1;; esac ;;
-        *) state_set_error "playit-address: formato host:puerto (ej. xxx.ply.gg:1234)"; exit 1 ;;
+            [ -n "$HOST" ] || { state_set_error "playit-address: host vacío (formato host o host:puerto)"; exit 1; }
+            case "$PORT" in ''|*[!0-9]*) state_set_error "playit-address: puerto inválido (formato host o host:puerto)"; exit 1;; esac
+            [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { state_set_error "playit-address: puerto fuera de rango (1-65535)"; exit 1; } ;;
+        *)
+            # host sin puerto: válido (los tunnels *.tun.ply.gg no llevan)
+            HOST="$V" ;;
+    esac
+    case "$HOST" in
+        *[!A-Za-z0-9._-]*) state_set_error "playit-address: host inválido (ej. xxx.tun.ply.gg)"; exit 1 ;;
     esac
     [ "$(state_field .playit.secret)" = "true" ] || { state_set_error "playit-address: vincula primero el túnel"; exit 1; }
     write_state ".playit.address = \"$V\" .playit.claimed = true .playit.manual = true .last_action = \"playit-address\" .last_error = null"

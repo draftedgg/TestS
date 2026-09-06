@@ -1,63 +1,112 @@
-# Pendientes — MCPanel (post-análisis 0.12)
+# Pendientes — MCPanel
 
-> Creado 2026-09-05 tras el análisis a fondo del proyecto. Referencias `archivo:linea` del estado actual.
-> Verificado en host: `bash -n` OK y `tests/run_mc_manager_tests.sh` **pasa completo (0 fallos)**.
+> Documento vivo de bugs conocidos y mejoras pendientes. Se actualiza tras cada
+> ronda de pruebas en dispositivo. Las secciones marcadas con ✅ están
+> cerradas en el commit/versión indicado; las `[ ]` siguen abiertas.
 
-## 1. Seguridad (urgente, no es código)
-- [ ] **Revocar el token personal de GitHub** expuesto en un chat anterior. REPORT.md ya lo documenta pero sigue sin evidencia de revocación. → **ACCIÓN DEL USUARIO** (no la puedo ejecutar yo sin credenciales).
+## Estado 0.19
 
-## 2. Bugs a corregir (prioridad alta → baja)
+B1–B4 cerrados (ver ✅ abajo). Suite 120/120 en verde, gemelos del script
+sincronizados (`diff -q` vacío), `bash -n` OK en ambas copias.
 
-### B1 — La RAM configurada nunca se aplica 🔴
-`detect_ram()` (`termux/mc_manager.sh:254`) asigna RAM_MIN/RAM_MAX **incondicionalmente**, pisando todo:
-- En `cmd_install` (`:341`) se llama después de parsear `--ram-min/--ram-max` → los flags se pierden.
-- En `cmd_start` (`:512`) se llama **antes** de leer state.json (`:513`) → el fallback nunca dispara.
+## Bugs cerrados en 0.19 (post 0.18) ✅
 
-Resultado: el preset por RAM física siempre gana; el botón "Cambiar RAM" (ram-set) es cosmético aunque la UI promete "Aplica al reiniciar".
-**Fix:** invertir prioridad → flags > state.json > preset. Ej.: al inicio de `detect_ram`, `[ -n "$RAM_MIN" ] && [ -n "$RAM_MAX" ] && return`.
+### B1 — Inicio se queda en "Cargando" aunque Ajustes diga "Vinculado"
+- **Síntoma:** Ajustes → Túnel playit.gg muestra "Vinculado" (y `playit.secret = true`
+  en `state.json`), pero Inicio nunca termina de arrancar — la fila Dirección
+  queda en estado "Cargando"/"Conectando…" aunque el túnel está vivo en el
+  dashboard.
+- **Causa raíz:** `watchMerged` no incluye `secret` ni la presencia de
+  `address` en su firma (L591), así que un digest que solo actualiza esos
+  campos no dispara re-render. Además, en Inicio, la rama `pRunning`
+  (L548-556) es la única que muestra el spinner "Conectando…", y como el
+  daemon local no se queda corriendo entre sesiones, `pRunning=false` →
+  entra en la rama `else` con "Iniciar túnel", que al tap solo regenera
+  claim (porque ya está vinculado) y vuelve a la rama `needsClaim`. Doble
+  apariencia de "no ha pasado nada".
+- **Fix propuesto:** (a) ampliar la firma de `watchMerged` con `secret` y
+  presencia de `address`; (b) nueva rama en Inicio para "vinculado + sin
+  dirección + daemon local no corriendo": muestra "Vinculado, sin dirección"
+  en plano (sin spinner), con un solo fantasma "Escribir dirección" si
+  aún no hay address; (c) quitar la rama "Conectando…" engañosa cuando
+  no hay túnel local activo — la percibe el usuario como cuelgue.
 
-### B2 — Carrera descarga↔instalación: jar parcial puede ser `server.jar` 🟠
-`Apis.downloadToFile` escribe directo en `inbox/` sin tmp+rename (`Apis.kt:41`). `startInstall` lanza la descarga y a continuación `install` (`MainActivity.kt:1258-1274`); el script acepta el jar con `[ -s ]` (`mc_manager.sh:394`) → un jar a medio descargar pasa como válido. En forge/neoforge el `mv` del inbox (`mc_manager.sh:457`) puede pisar un installer ya bajado por el script.
-**Fix:** descargar a `inbox/NAME.part` + rename atómico al terminar (la validación "PK" existe pero llega tarde).
+### B2 — "Escribir dirección" rechaza hosts sin puerto
+- **Síntoma:** el diálogo exige `host:puerto` (regex en `openAddressDialog`).
+  Los tunnels de playit.gg vienen en `*.tun.ply.gg` sin puerto, que es
+  rechazado en silencio. Decisión del usuario: **mantener el botón, hacer
+  el parsing más flexible**.
+- **Causa:** la regex `[^\\s:]+:[0-9]+` exige puerto. Falla con
+  `percussion-refer.tun.ply.gg` (un solo token, sin `:`).
+- **Fix propuesto:** aceptar `host` solo, `host:puerto`, y `host:puerto:puerto`
+  (por si copy-paste trae un sufijo sobrante). Validar host como FQDN o
+  IPv4 (no exigirlo como URL completa, no es un `https://…`):
+  - `^[A-Za-z0-9._-]+(:[0-9]+)?$` para `host` o `host:puerto`.
+  - Strip silencioso de path/prefijo si el usuario copia `https://algo` (recortar
+    a partir de `://` y quedarnos con `host[:puerto]`).
+  - Validar puerto 1-65535 si está presente; `default 25565` si falta.
+  - Mensaje de error explícito: "host:puerto (puerto opcional)".
+- **Pendiente UX:** el diálogo es de Inicio cuando `linked && pAddr == null`
+  y desaparece si el botón desaparece (ver B1: si tras la corrección la
+  dirección aparece sola vía `playit-cli status`, el caso sin-address es
+  marginal). Mantener por ahora: tu comentario "no quitar" lo deja
+  dentro.
 
-### B3 — `prop server-port X` no actualiza `state.port` 🟠
-`cmd_prop` (`mc_manager.sh:628`) no toca state.port; Inicio muestra `lanIP:$port` con el default 25565 (`MainActivity.kt:414`).
-**Fix:** en `cmd_prop`, si `K=server-port`, hacer `write_state ".port = $V"`.
+### B3 — Falso error "playit vinculado pero sin dirección" persistente
+- **Síntoma:** el mensaje aparece en Inicio bajo "Fabric 1.21.1" aunque
+  el túnel está vivo y vinculado. `state.last_error` arrastra el error
+  histórico.
+- **Causa:** `playit_do_exchange` (`mc_manager.sh`) llama
+  `state_set_error "playit vinculado pero sin dirección..."` cuando
+  rc=0 (vínculo OK) pero el digest no encuentra address. El digest
+  posterior **no borra** `last_error` cuando aparece dirección.
+- **Fix propuesto:** en `playit_do_exchange` separar éxito-en-vinculo y
+  éxito-con-dirección: si rc=0 pero `playit_wait_address` falla, usar
+  `state_set_warn` (o `last_action=playit-exchange` con `last_error=null`)
+  y un `last_action` distinto como "playit-vinculado". Más importante: en
+  `playit_digest`, dentro del bloque de actualización, si
+  `RUN=true && ADDR != ""` entonces `upd="$upd .last_error = null"` para
+  que la UI no arrastre el mensaje obsoleto. Con esta pieza, B3 se
+  resuelve solo sin tocar `openAddressDialog`.
 
-### B4 — `installScript` trunca el script en ejecución 🟡
-`Embed.runManager` copia `res/raw/mc_manager` sobre el archivo en ejecución en cada llamada (`Embed.kt:282`, truncate). KeepAlive corre `status` cada 12 s; si hay un comando largo en curso, bash puede leer el archivo mezclado.
-**Fix:** escribir a `mc_manager.sh.tmp` + rename atómico.
+### B4 — Botón "Ver registro" fantasma en Inicio
+- **Síntoma:** en Inicio, debajo de "Fabric 1.21.1", aparece "Ver registro"
+  (abre `lastRunLog`). Con el servidor apagado el log está vacío; con
+  servidor encendido el detalle vive en Consola, no aquí. El botón añade
+  ruido sin aportar.
+- **Causa:** L510-512 de `MainActivity.kt`, dentro del bloque
+  `if (err.isNotEmpty())`. El concepto "ver registro de error" tiene
+  sentido en Consola (donde hay log de Minecraft) pero no en Inicio
+  (donde solo hay metadata de playit).
+- **Fix propuesto:** borrar el bloque completo. Si quieres diagnóstico
+  del estado de playit, sigue disponible el botón "Diagnóstico" en
+  Ajustes (que vuelca `playit-debug.log` redactado). Si quieres ver
+  errores del último run del servidor, ve a Consola.
 
-### Menores
-- [x] `STATE_TMP` (`mc_manager.sh:29`) es variable muerta — eliminado.
-- [x] `backup` sin `save-off`/`save-all` → mundo puede quedar inconsistente con server encendido (`mc_manager.sh:586`) — `cmd_backup` envía `save-all flush` por tmux antes de comprimir.
-- [x] WakeLock de descargas limitado a 15 min (`DownloadService.kt:40`) — jar grande en red lenta sigue sin lock — subido a 30 min.
-- [x] `cmd_start`: salida de java ya redirigida a console.log Y `pipe-pane` al mismo archivo (`mc_manager.sh:535`) — redundante, posible duplicado — quitado pipe-pane.
-- [x] `mod-install` borra el jar inválido del inbox (`mc_manager.sh:609`) — mejor conservarlo y solo avisar — renombra a `.invalid`.
-- [x] `clearError()` de la app reescribe state.json compitiendo con el script (`MainActivity.kt:327`) — frágil pero autocorrige.
+## Plan de ejecución (ejecutado en 0.19) ✅
 
-### Túnel playit v1.0.x — flujo claim vía playit-cli (corrige el modelo secret-pegado)
-- [x] El flujo "pegar secret_key del dashboard" no existe en playit.gg: el claim ES lo que crea el agent. Revertido entero.
-- [x] El paquete TUR instala `playit-cli` junto a `playitd`: `claim generate` → código, `claim url` → URL, `claim exchange --wait` imprime el secreto por stdout (captura privada, nunca `$SHARED`).
-- [x] Nuevos subcomandos `playit-claim` (genera y guarda URL+código, sale 0; purga líneas hex-64 filtradas de `install.log`) y `playit-exchange` (captura secreto a fichero privado, escribe `secret_key` en toml 600, tritura captura, relanza daemon con `--secret-path`, encadena espera de dirección; lock mkdir anti-doble-ejecución).
-- [x] `playit-start` sin vínculo genera claim fresco (regenerar-siempre: los códigos caducan); vinculado asegura daemon y espera dirección.
-- [x] Nuevo `playit-unlink` (mata sesión + `playit-cli reset` + borra toml + limpia campos). Borrado el modelo secret-pegado.
-- [x] Estado: `playit.claim_url`, `playit.claim_code`, `playit.needs_claim`; `playit.secret` = vinculado-tras-exchange.
-- [x] App: rama claim en Inicio (URL + Abrir enlace + "Confirmar vinculación" con helper de orden), auto-exchange con delay tras el tap inicial (MC_PLAYIT_CLAIM_DELAY=20s), Ajustes Vincular/Desvincular, diálogo de pegado borrado, watcher con claim en la firma.
-- [x] Tests: stub playit-cli/playitd/timeout + ~15 casos del flujo (claim, exchange ok/timeout/sin-pendiente, start vinculado/sin-vínculo, unlink).
-- [x] Dirección por `playit-cli status` (`Secret configured` como verdad del vínculo + snapshot) con fallback a entrada manual (`playit-address`, flag `manual` respetado por el digest); ANSI-strip en el digest; `playit-debug` con volcado redactado; claim_code se limpia al vincular.
+1. ✅ App: "Ver registro" de Inicio borrado (B4).
+2. ✅ App: B2 (parsing flexible en `openAddressDialog`: host solo,
+   host:puerto, URLs pegadas recortadas, puerto 1-65535, sufijo sobrante
+   `host:p:p` tolerado) y B1 (nueva rama "Vinculado, sin dirección" sin
+   spinner + `watchMerged` ampliado con `secret`).
+3. ✅ Script: B3 (`playit_do_exchange` termina en `playit-vinculado` con
+   `last_error=null` y rc=2 cuando no hay dirección; los callers tratan
+   rc=2 como éxito; `playit_digest` limpia `last_error` cuando
+   `RUN=true && ADDR != ""`).
+4. ✅ Tests: `playit-address` acepta host sin puerto y URLs pegadas;
+   rechaza puertos fuera de rango; nuevos casos B3 (sin falso error al
+   vincular sin dirección + digest limpia `last_error`).
+5. ✅ Suite verde (120/120), push, APK 0.19 vía CI.
 
-## 3. Documentación (drift con el código)
-- [ ] README/REPORT aún describen el **modo Termux externo** (intents `com.termux.RUN_COMMAND`, `allow-external-apps=true`); la app 0.12 es 100 % embebida (`Embed.runManager`, ProcessBuilder interno).
-- [ ] `termux/bootstrap.sh` y `strings.xml` ("Termux no está instalado") son restos legacy — limpiar o marcar como legacy.
-- [ ] REPORT.md: anotar que el WIP "prefijo embebido" ya está materializado (APK 0.12 construido con firma estable en CI).
+## Convenciones para el próximo agente
 
-## 4. Validación pendiente (la gran asignatura)
-- [ ] **Checklist en dispositivo real** (`tests/manual_checklist.md`, 25 ítems): nada probado aún en hardware. Críticos: bootstrap extracción/exec, dpkg shim con openjdk real, playit claim, wakelock con pantalla apagada, instalación punta a punta.
-
-## 5. Mejoras opcionales (backlog)
-- [ ] Verificación de checksum en descargas (comparar con hash de la API) — hoy solo magic bytes "PK".
-- [ ] Tests: caso con `MC_EMBEDDED=1` ya existe; añadir uno para B1 (RAM flags vs preset) al arreglarlo.
-
----
-**Orden sugerido al retomar:** 1 (token) → B1 → B2 → B3+B4 → docs → dispositivo.
+- Una sola causa raíz común a B1+B3 (cerrada): el digest no distinguía
+  "túnel vinculado, dirección aún no propagada" de "todavía cargando".
+- El flujo playit ahora tiene un estado explícito "vinculado sin
+  dirección": el script lo marca con `last_action=playit-vinculado` y
+  sin `last_error`; la UI lo muestra en plano con el escape manual
+  "Escribir dirección" (que ahora acepta host sin puerto).
+- Tras cualquier cambio al script: bash -n ambas copias, diff -q
+  termux/mc_manager.sh app/src/main/res/raw/mc_manager, suite en verde
+  (120/120 actual).

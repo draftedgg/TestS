@@ -511,7 +511,6 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(6f) })
         if (err.isNotEmpty()) {
             col.addView(tv(err, 12.5f, WARN), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
-            col.addBtn("Ver registro", Style.GHOST, height = 40f, marginTop = 0f) { showLogDialog("Última ejecución", lastRunLog) }
         }
         col.addBtn(if (serverBusy) (busyText ?: "…") else if (running) "Detener servidor" else "Iniciar servidor",
             if (running) Style.DANGER_TEXT else Style.PRIMARY,
@@ -547,15 +546,21 @@ class MainActivity : Activity() {
                         { readState()?.optJSONObject("playit")?.optBoolean("needs_claim") != true })
                 }
             }
-            pRunning -> {
-                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                row.addView(spinner(), LinearLayout.LayoutParams(px(20f), px(20f)))
-                row.addView(tv("Conectando…", 13.5f, TEXT, bold = true),
-                    LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
-                col.addView(row)
+            pRunning && !linked -> {
+                // Daemon up but not linked yet: the claim row above handles
+                // it. Nothing spinner-like here — waiting for approval is a
+                // normal state, not a hang (B1).
+            }
+            pRunning && linked -> {
+                // B1: linked + still no address. This is a stable, expected
+                // state (e.g. no Tunnel created in the dashboard yet) — show
+                // it plainly, no spinner, with the manual escape hatch.
+                col.addView(tv("Vinculado, sin dirección", 13.5f, TEXT, bold = true))
+                col.addView(tv("Crea un Tunnel en playit.gg apuntando al puerto $port.", 12f, MUTED),
+                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
                 col.addBtn("Abrir playit.gg", Style.GHOST, height = 42f, marginTop = 10f) { open("https://playit.gg/account/tunnels") }
                 col.addBtn("Ver registro", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Registro del túnel", tunnelLog) }
-                if (linked) col.addBtn("Escribir dirección", Style.GHOST, height = 42f, marginTop = 4f) { openAddressDialog() }
+                col.addBtn("Escribir dirección", Style.GHOST, height = 42f, marginTop = 4f) { openAddressDialog() }
             }
             else -> {
                 val lan = lanIp()
@@ -591,11 +596,13 @@ class MainActivity : Activity() {
         fun curSig(): String {
             val st = readState()
             val r = st?.optBoolean("running") == true
-            val p = st?.optJSONObject("playit")?.optBoolean("running") == true
-            val a = st?.optJSONObject("playit")?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
-            val c = st?.optJSONObject("playit")?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
-            val n = st?.optJSONObject("playit")?.optBoolean("needs_claim") == true
-            return "$r|$p|$a|$c|$n|${sval(st, "last_error")}|$actionBusy"
+            val pj = st?.optJSONObject("playit")
+            val p = pj?.optBoolean("running") == true
+            val a = pj?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
+            val c = pj?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" } ?: ""
+            val n = pj?.optBoolean("needs_claim") == true
+            val s = pj?.optBoolean("secret") == true
+            return "$r|$p|$a|$c|$n|$s|${sval(st, "last_error")}|$actionBusy"
         }
         var last = curSig()
         while (isActive) {
@@ -952,21 +959,42 @@ class MainActivity : Activity() {
     // ── diálogo: dirección manual del túnel ──────────────────────────
     private fun openAddressDialog() {
         val input = EditText(this).apply {
-            hint = "xxx.ply.gg:1234"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
+            hint = "xxx.tun.ply.gg o xxx.ply.gg:1234"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
             background = rounded(SURFACE, 12f, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
-        wrap.addView(tv("Copia la dirección pública desde playit.gg/account/tunnels.", 12f, MUTED))
+        wrap.addView(tv("Dirección pública de playit.gg, con o sin puerto.", 12f, MUTED))
         wrap.addView(input, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(8f) })
         AlertDialog.Builder(this)
             .setTitle("Dirección del túnel")
             .setView(ScrollView(this).apply { addView(wrap) })
             .setNegativeButton("Cancelar", null)
             .setPositiveButton("Guardar") { _, _ ->
-                val v = input.text.toString().trim()
-                if (!Regex("[^\\s:]+:[0-9]+").matches(v)) { toast("Formato host:puerto."); return@setPositiveButton }
+                // B2: accept `host`, `host:puerto`, and pasted URLs; strip
+                // scheme/path/query, validate the rest (host + optional port).
+                var v = input.text.toString().trim()
+                v = v.substringAfter("://", v).substringBefore('/').substringBefore('?')
+                if (v.isEmpty()) { toast("Formato host o host:puerto."); return@setPositiveButton }
+                val host: String
+                var port: String? = null
+                val parts = v.split(':')
+                if (parts.size > 1) {
+                    // host:puerto, or host:puerto:extra (stray suffix from copy-paste)
+                    host = parts[0]
+                    port = parts[1]
+                    val p = port.toIntOrNull()
+                    if (host.isEmpty() || p == null || p !in 1..65535) {
+                        toast("Formato host o host:puerto (puerto 1-65535).")
+                        return@setPositiveButton
+                    }
+                    v = "$host:$port"
+                } else host = v
+                if (!Regex("[A-Za-z0-9._-]+").matches(host)) {
+                    toast("Host inválido (ej. xxx.tun.ply.gg).")
+                    return@setPositiveButton
+                }
                 runTermux("playit-address", v)
                 toast("Dirección guardada.")
                 scope.launch { delay(1200); render() }

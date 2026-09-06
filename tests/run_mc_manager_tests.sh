@@ -320,10 +320,21 @@ run playit-address 'srv.example.ply.gg:9999'
 [ "$(jq -r '.playit.manual' "$STATE")" = true ] && PASS "playit-address sets manual" || FAIL "playit-address manual"
 run playit-status
 echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'srv.example.ply.gg:9999' && PASS "digest preserves manual" || FAIL "manual preserved"
-run playit-address 'sinsentido'
-[ "$?" -ne 0 ] && PASS "playit-address rejects no-port" || FAIL "playit-address no-port"
 run playit-address 'h:abc'
 [ "$?" -ne 0 ] && PASS "playit-address rejects bad-port" || FAIL "playit-address bad-port"
+run playit-address 'srv.example.ply.gg:99999'
+[ "$?" -ne 0 ] && PASS "playit-address rejects out-of-range port" || FAIL "playit-address port range"
+# B2: host without port is now VALID (playit tunnels like *.tun.ply.gg lack one)
+run playit-address 'percussion-refer.tun.ply.gg'
+[ "$?" -eq 0 ] && PASS "B2 host-only accepted" || FAIL "B2 host-only accepted"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'percussion-refer.tun.ply.gg' && PASS "B2 host-only stored" || FAIL "B2 host-only stored"
+# B2: pasted URL is stripped to host[:port]
+run playit-address 'https://percussion-refer.tun.ply.gg/some/path?x=1'
+[ "$?" -eq 0 ] && PASS "B2 pasted URL accepted" || FAIL "B2 pasted URL accepted"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'percussion-refer.tun.ply.gg' && PASS "B2 pasted URL stripped to host" || FAIL "B2 pasted URL stripped"
+run playit-address 'https://srv.example.ply.gg:1234'
+[ "$?" -eq 0 ] && PASS "B2 pasted URL with port accepted" || FAIL "B2 URL with port"
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'srv.example.ply.gg:1234' && PASS "B2 URL with port stripped" || FAIL "B2 URL with port stored"
 run playit-stop >/dev/null 2>&1
 [ "$(jq -r '.playit.manual' "$STATE")" = false ] && PASS "stop clears manual" || FAIL "stop manual"
 [ "$(jq -r '.playit.address' "$STATE")" = null ] && PASS "stop clears manual address" || FAIL "stop manual address"
@@ -338,6 +349,32 @@ run playit-debug
 [ -f "$MC_SHARED/playit-debug.log" ] && PASS "playit-debug written" || FAIL "playit-debug file"
 ! grep -q '74f8bbb' "$MC_SHARED/playit-debug.log" && PASS "playit-debug redacts tokens" || FAIL "playit-debug token leak"
 grep -q 'playit-cli status' "$MC_SHARED/playit-debug.log" && PASS "playit-debug has status section" || FAIL "playit-debug status"
+rm -f "$MC_TMUX_MARKER"
+
+# ─── B3: digest clears stale last_error once a real address appears ───
+# Simulate the exact bug: a "vinculado pero sin dirección" error lingers
+# while the tunnel is alive and publishing an address.
+run playit-claim >/dev/null 2>&1
+MC_PLAYIT_SEED='srv.gl.at.ply.gg:7777' run playit-exchange >/dev/null 2>&1
+[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "B3 setup: linked" || FAIL "B3 setup linked"
+# Forge a stale error as if exchange had linked without address, then let the
+# digest see the address from MC_PLAYIT_SEED.
+printf 'link done' > /dev/null # (setup above already published an address)
+run playit-unlink >/dev/null 2>&1
+run playit-claim >/dev/null 2>&1
+MC_PLAYIT_EXCHANGE_FAIL=1 run playit-exchange >/dev/null 2>&1
+[ "$(jq -r '.playit.secret' "$STATE")" = false ] && PASS "B3 setup: unlinked with error" || FAIL "B3 setup unlinked"
+# Now link for real but let exchange finish WITHOUT address; error recorded.
+MC_PLAYIT_WAIT=0 run playit-exchange >/dev/null 2>&1 || true
+ERR=$(jq -r '.last_error' "$STATE")
+[ "$ERR" = null ] && PASS "B3 linked-without-address sets no error" || FAIL "B3 no false error (got: $ERR)"
+[ "$(jq -r '.playit.secret' "$STATE")" = true ] && PASS "B3 linked-without-address links" || FAIL "B3 linked"
+# Address appears later via digest → last_error must stay null / be cleared.
+printf 'srv2.gl.at.ply.gg:8888\n' > "$MC_SHARED/tunnel.log"
+run playit-status
+echo "$(jq -r '.playit.address' "$STATE")" | grep -q 'srv2.gl.at.ply.gg:8888' && PASS "B3 digest picks up address" || FAIL "B3 digest address"
+[ "$(jq -r '.last_error' "$STATE")" = null ] && PASS "B3 digest clears last_error with address" || FAIL "B3 last_error cleared"
+run playit-unlink >/dev/null 2>&1
 rm -f "$MC_TMUX_MARKER"
 
 # ─── B1: RAM priority is flag > state.json > hardware preset ──────────
