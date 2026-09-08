@@ -115,7 +115,12 @@ class MainActivity : Activity() {
     private val TERM_BG = Color.rgb(9, 12, 17)
     private val OK_BG = Color.rgb(13, 42, 31)
     private val OFF_BG = Color.rgb(30, 32, 36)
+    private val ACCENT_FAINT = Color.argb(38, 46, 229, 157)   // acento al 15%: pill del tab activo
     private val RADIUS = 16f
+    private val RADIUS_SM = 12f
+
+    /** Viñeta de estado: ● vivo / ○ apagado, siempre pegada al dato. */
+    private fun dot(on: Boolean): String = if (on) "●" else "○"
 
     private enum class Style { PRIMARY, SECONDARY, DANGER, DANGER_TEXT, GHOST, PLAIN }
 
@@ -251,9 +256,9 @@ class MainActivity : Activity() {
     }
 
     private fun LinearLayout.addHeader(title: String, sub: String? = null) {
-        addView(tv(title, 21f, TEXT, bold = true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(2f) })
+        addView(tv(title, 21f, TEXT, bold = true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(4f) })
         if (sub != null) addView(tv(sub, 13f, MUTED))
-        addView(View(this@MainActivity).apply { setBackgroundColor(Color.TRANSPARENT) }, LinearLayout.LayoutParams(-1, px(4f)))
+        addView(View(this@MainActivity).apply { setBackgroundColor(Color.TRANSPARENT) }, LinearLayout.LayoutParams(-1, px(8f)))
     }
 
     private fun LinearLayout.addInfo(label: String, value: String, valueColor: Int = TEXT, monoValue: Boolean = true) {
@@ -281,13 +286,13 @@ class MainActivity : Activity() {
         }
         r.addView(tv(label, 15f, labelColor, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
         if (value != null) {
-            r.addView(tv(value, 13.5f, valueColor, bold = true, mono = valueMono),
+            r.addView(tv(value, 13.5f, valueColor, bold = true, mono = valueMono).apply { maxLines = 1 },
                 LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(8f) })
         }
         if (onClick != null) {
             r.addView(tv("›", 17f, FAINT), LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(8f) })
         }
-        addView(r, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(marginTop) })
+        addView(r, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(marginTop) })
     }
 
     /** Acciones secundarias en una sola línea de enlaces de texto (sin pila de botones). */
@@ -317,7 +322,7 @@ class MainActivity : Activity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.rgb(13, 17, 23))
-            setPadding(0, px(6f), 0, px(8f))
+            setPadding(0, px(8f), 0, px(8f))
         }
         Tab.values().forEach { t ->
             val active = t == tab
@@ -327,13 +332,20 @@ class MainActivity : Activity() {
                 // fila entera clicable: diana de toque de 48dp+, no solo el texto
                 setOnClickListener { if (!active) goto(t) }
             }
-            item.addView(ImageView(this).apply {
+            // indicador M3 Expressive: pill del color del acento al 15% detrás del icono activo
+            val iconHolder = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
+                if (active) background = rounded(ACCENT_FAINT, 100f)
+                setPadding(px(16f), px(4f), px(16f), px(4f))
+            }
+            iconHolder.addView(ImageView(this).apply {
                 setImageResource(navIcon(t))
                 imageTintList = android.content.res.ColorStateList.valueOf(if (active) ACCENT else FAINT)
                 contentDescription = t.label
-            }, LinearLayout.LayoutParams(px(24f), px(24f)).apply { topMargin = px(6f) })
+            }, LinearLayout.LayoutParams(px(22f), px(22f)))
+            item.addView(iconHolder, LinearLayout.LayoutParams(-2, -2).apply { topMargin = px(2f) })
             item.addView(tv(t.label, 12f, if (active) ACCENT else FAINT, bold = active).apply { gravity = Gravity.CENTER },
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f); bottomMargin = px(8f) })
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f); bottomMargin = px(4f) })
             bar.addView(item, LinearLayout.LayoutParams(0, -2, 1f))
         }
         return bar
@@ -538,34 +550,35 @@ class MainActivity : Activity() {
 
         // ── estado ──
         // Sin rótulos: el nombre de la app ya está en el launcher. Una línea
-        // que responde "¿está encendido?" y nada más.
-        col.addView(tv(if (running) "Encendido" else "Apagado", 15f,
+        // que responde "¿está encendido?" y nada más. Viñeta de estado, no
+        // palabra suelta: el color YA dice encendido/apagado.
+        col.addView(tv("${dot(running)} ${if (running) "Encendido" else "Apagado"}", 15f,
             if (running) ACCENT else MUTED, bold = true),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         col.addView(tv("$loader $version", 12.5f, MUTED),
-            LinearLayout.LayoutParams(-1, -2))
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
         if (err.isNotEmpty()) {
-            col.addView(tv(err, 12.5f, WARN).apply { maxLines = 2 }, LinearLayout.LayoutParams(-1, -2).apply {
-                topMargin = px(8f) })
+            col.addView(tv(err, 12.5f, WARN).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         }
         col.addBtn(if (serverBusy) (busyText ?: "…") else if (running) "Apagar" else "Encender",
             if (running) Style.DANGER else Style.PRIMARY,
             enabled = !serverBusy,
-            marginTop = 14f) {
+            marginTop = 16f) {
             toggleServer()
         }
 
         // ── dirección: la dirección ES el botón (tap = copiar) ──
         col.addView(tv("Dirección", 11f, FAINT, bold = true, ls = 0.06f),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(22f) })
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f) })
         col.addView(View(this), LinearLayout.LayoutParams(-1, px(8f)))
         when {
             claimed -> {
                 // La dirección es el botón: tap = copiar (y toast). Sin
                 // fila de estado: "Detener túnel" ya dice que está activo.
-                val addr = tv(pAddr!!, 16f, ACCENT, bold = true, mono = true)
+                val addr = tv(pAddr!!, 16f, ACCENT, bold = true, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }
                 addr.background = rounded(SURFACE, RADIUS, STROKE, 1)
-                addr.setPadding(px(14f), px(12f), px(14f), px(12f))
+                addr.setPadding(px(16f), px(12f), px(16f), px(12f))
                 addr.setOnClickListener { copy(pAddr!!) }
                 col.addView(addr, LinearLayout.LayoutParams(-1, -2))
             }
@@ -613,12 +626,12 @@ class MainActivity : Activity() {
             else -> {
                 val lan = lanIp()
                 if (lan != null) {
-                    val lanTv = tv("$lan:$port", 14f, MUTED, bold = true, mono = true)
+                    val lanTv = tv("$lan:$port", 14f, MUTED, bold = true, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }
                     lanTv.background = rounded(SURFACE, RADIUS, STROKE, 1)
-                    lanTv.setPadding(px(14f), px(12f), px(14f), px(12f))
+                    lanTv.setPadding(px(16f), px(12f), px(16f), px(12f))
                     lanTv.setOnClickListener { copy("$lan:$port") }
                     col.addView(lanTv, LinearLayout.LayoutParams(-1, -2))
-                    col.addView(tv("Solo esta Wi-Fi", 11f, FAINT),
+                    col.addView(tv("Solo esta Wi-Fi — usa playit.gg para jugar desde fuera", 11f, FAINT),
                         LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
                 }
                 col.addLinks(Triple(if (tunnelBusy) (busyText ?: "…") else "Conectar con playit.gg",
@@ -677,19 +690,20 @@ class MainActivity : Activity() {
         var running = st?.optBoolean("running") == true
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         head.addView(tv("Consola", 21f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-        val pillTv = pill(if (running) "● En vivo" else "○ Apagado", if (running) OK_BG else OFF_BG, if (running) ACCENT else MUTED)
+        val pillTv = pill(if (running) "${dot(true)} En vivo" else "${dot(false)} Apagado", if (running) OK_BG else OFF_BG, if (running) ACCENT else MUTED)
         head.addView(pillTv, LinearLayout.LayoutParams(-2, -2))
         root.addView(head, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
 
         // Sin setTextIsSelectable: el texto seleccionable roba los gestos de
         // scroll del ScrollView padre (el scroll quedaba inutilizable).
+        // Padding inferior extra: la última línea no muere cortada en el borde.
         val logTv = TextView(this).apply {
             textSize = 12f; setTextColor(Color.rgb(203, 213, 225)); typeface = Typeface.MONOSPACE
-            setPadding(px(10f), px(10f), px(10f), px(10f))
+            setPadding(px(12f), px(12f), px(12f), px(20f))
         }
         val scroller = ScrollView(this).apply {
             setBackgroundColor(TERM_BG)
-            background = rounded(TERM_BG, 12f, STROKE, 1)
+            background = rounded(TERM_BG, RADIUS_SM, STROKE, 1)
             isFillViewport = false
         }
         scroller.addView(logTv, LinearLayout.LayoutParams(-1, -2))
@@ -711,7 +725,7 @@ class MainActivity : Activity() {
             setTextColor(TEXT); setHintTextColor(FAINT)
             textSize = 13f
             setBackgroundColor(Color.TRANSPARENT)
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             imeOptions = EditorInfo.IME_ACTION_SEND
             setSingleLine(true)
@@ -751,7 +765,7 @@ class MainActivity : Activity() {
                 val rNow = stNow?.optBoolean("running") == true
                 if (rNow != running) {
                     running = rNow
-                    pillTv.text = if (rNow) "● En vivo" else "○ Apagado"
+                    pillTv.text = if (rNow) "${dot(true)} En vivo" else "${dot(false)} Apagado"
                     pillTv.setTextColor(if (rNow) ACCENT else MUTED)
                     pillTv.background = rounded(if (rNow) OK_BG else OFF_BG, 100f)
                 }
@@ -810,7 +824,7 @@ class MainActivity : Activity() {
         val query = EditText(this).apply {
             hint = "Buscar $noun en Modrinth…"
             setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
             imeOptions = EditorInfo.IME_ACTION_SEARCH
@@ -828,7 +842,7 @@ class MainActivity : Activity() {
                 val hits = withContext(Dispatchers.IO) { Apis.modrinthSearch(q, mcVersion, loader) }
                 results.removeAllViews()
                 if (hits.isEmpty()) {
-                    results.addView(tv("Sin resultados para $mcVersion.", color = MUTED))
+                    results.addView(tv("Sin resultados para $mcVersion. Prueba con otro nombre o revisa la conexión.", 12.5f, MUTED))
                     return@launch
                 }
                 hits.forEach { h ->
@@ -838,7 +852,7 @@ class MainActivity : Activity() {
                     }
                     val txt = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
                     txt.addView(tv(h.title, 14f, TEXT, bold = true))
-                    txt.addView(tv(h.description.take(70), 11.5f, MUTED))
+                    txt.addView(tv(h.description, 11.5f, MUTED).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END })
                     row.addView(txt, LinearLayout.LayoutParams(0, -2, 1f))
                     val add = tv("Añadir", 13f, ACCENT, bold = true).apply {
                         setPadding(px(10f), px(12f), px(2f), px(12f))
@@ -865,18 +879,18 @@ class MainActivity : Activity() {
 
         // instalados (plano, sin tarjeta)
         col.addView(tv("Instalados", 11f, FAINT, bold = true, ls = 0.06f),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(20f); bottomMargin = px(8f) })
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f); bottomMargin = px(4f) })
         val dest = if (isPlugin) File(Embed.serverDir(this@MainActivity), "plugins") else File(Embed.serverDir(this@MainActivity), "mods")
         val files = if (dest.exists()) dest.listFiles()?.sortedBy { it.name } else null
         if (files.isNullOrEmpty()) {
-            col.addView(tv("Sin ${noun}s.", color = MUTED))
+            col.addView(tv("Nada instalado todavía: busca arriba y toca Añadir.", 12.5f, MUTED))
         } else {
             files.forEach { f ->
                 val row = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                 }
-                row.addView(tv(f.name, 13.5f, TEXT, mono = true).apply { maxLines = 1 }, LinearLayout.LayoutParams(0, -2, 1f))
+                row.addView(tv(f.name, 13.5f, TEXT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }, LinearLayout.LayoutParams(0, -2, 1f))
                 val del = tv("Quitar", 13f, DANGER, bold = true).apply {
                     setPadding(px(10f), px(12f), px(2f), px(12f))
                     setOnClickListener {
@@ -913,16 +927,16 @@ class MainActivity : Activity() {
 
         // ── servidor ──
         section("Servidor")
-        col.addRow("RAM", prettyRam(sval(st, "ram_max")), ACCENT, valueMono = true, marginTop = 6f) { openRamDialog(st) }
+        col.addRow("RAM", prettyRam(sval(st, "ram_max")), ACCENT, valueMono = true, marginTop = 8f) { openRamDialog(st) }
         col.addRow("Propiedades") { openPropsDialog() }
         col.addRow("Respaldos", backupsLabel()) { openBackupsDialog() }
-        col.addRow("Crear respaldo") { runTermux("backup"); toast("Respaldo en proceso…") }
+        col.addRow("Crear respaldo", "copia completa", valueColor = MUTED, marginTop = 8f) { runTermux("backup"); toast("Respaldo en proceso…") }
         if (running) col.addView(tv("RAM y propiedades aplican al reiniciar.", 11.5f, FAINT),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
 
         // ── túnel ──
         section("Túnel")
-        col.addRow("playit.gg", if (linked) "Vinculado" else "Sin vincular", if (linked) ACCENT else MUTED, marginTop = 6f) {
+        col.addRow("playit.gg", if (linked) "Vinculado" else "Sin vincular", if (linked) ACCENT else MUTED, marginTop = 8f) {
             if (linked) openTunnelDialog(st) else {
                 runTermux("playit-start")
                 toast("Generando enlace…")
@@ -941,14 +955,14 @@ class MainActivity : Activity() {
             else KeepAliveService.cancel(this)
         }
         keepRow.addView(sw, LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
-        col.addView(keepRow, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(6f) })
+        col.addView(keepRow, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(8f) })
         if (!isBatteryIgnored()) {
             col.addRow("Optimización de batería", "activa", WARN) { requestIgnoreBattery() }
         }
 
         // ── aplicación ──
         section("Aplicación")
-        col.addRow("Versión", appVersion(), MUTED, marginTop = 6f)
+        col.addRow("Versión", appVersion(), MUTED, valueMono = true, marginTop = 8f)
         if (!hasStorage()) {
             col.addRow("Acceso a archivos", "sin acceso", WARN) { requestStorage() }
         }
@@ -1019,7 +1033,7 @@ class MainActivity : Activity() {
     private fun openAddressDialog() {
         val input = EditText(this).apply {
             hint = "xxx.tun.ply.gg o xxx.ply.gg:1234"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
@@ -1065,7 +1079,7 @@ class MainActivity : Activity() {
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
         fun field(value: String): EditText = EditText(this).apply {
             setText(value); setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
@@ -1103,7 +1117,7 @@ class MainActivity : Activity() {
         val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
         fun field(hint: String, key: String): EditText = EditText(this).apply {
             setText(propValue(key)); this.hint = hint; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
@@ -1116,7 +1130,7 @@ class MainActivity : Activity() {
         val online = field("true o false (true = solo cuentas premium)", "online-mode")
         val extra = EditText(this).apply {
             hint = "clave=valor (p. ej. spawn-protection=0)"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
@@ -1177,7 +1191,7 @@ class MainActivity : Activity() {
             hint = "Escribe BORRAR"
             setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
             setBackgroundColor(Color.TRANSPARENT)
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
         }
         AlertDialog.Builder(this)
@@ -1310,7 +1324,7 @@ class MainActivity : Activity() {
             }
             val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             head.addView(tv(name, 17f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-            head.addView(tv(if (sel) "✓" else if (id == "paper") "Recomendado" else "", 11f, if (sel) ACCENT else FAINT, bold = true),
+            head.addView(tv(if (sel) "Seleccionado" else if (id == "paper") "Recomendado" else "", 11f, if (sel) ACCENT else FAINT, bold = true),
                 LinearLayout.LayoutParams(-2, -2))
             c.addView(head)
             col.addView(c, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
@@ -1329,7 +1343,7 @@ class MainActivity : Activity() {
         val manual = EditText(this).apply {
             hint = "…o escribe una versión exacta (ej. 1.20.1)"
             setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
-            background = rounded(SURFACE, 12f, STROKE, 1)
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
@@ -1341,7 +1355,9 @@ class MainActivity : Activity() {
             wizardVersion = v
             manual.setText(v)
             for (i in 0 until list.childCount) {
-                list.getChildAt(i).background = rounded(CARD, 10f, STROKE, 1)
+                val row = list.getChildAt(i)
+                val isSel = row.tag == v
+                row.background = rounded(if (isSel) ACCENT_FAINT else CARD, RADIUS_SM, if (isSel) ACCENT else STROKE, if (isSel) 2 else 1)
             }
         }
         val loader = wizardLoader
@@ -1364,13 +1380,14 @@ class MainActivity : Activity() {
                 val row = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
-                    background = rounded(CARD, 10f, STROKE, 1)
+                    background = rounded(CARD, RADIUS_SM, STROKE, 1)
                     setPadding(px(12f), 0, px(12f), 0)
                     setOnClickListener { pick(v) }
                 }
                 row.addView(tv(v, 15f, TEXT, bold = rec, mono = true), LinearLayout.LayoutParams(0, -2, 1f))
                 if (rec) row.addView(tv("Más reciente", 10f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
-                list.addView(row, LinearLayout.LayoutParams(-1, px(46f)).apply { bottomMargin = px(6f) })
+                row.tag = v
+                list.addView(row, LinearLayout.LayoutParams(-1, px(48f)).apply { bottomMargin = px(8f) })
             }
         }
         col.addBtn("Continuar", Style.PRIMARY, marginTop = 16f) {
