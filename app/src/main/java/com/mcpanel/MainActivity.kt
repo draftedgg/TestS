@@ -23,6 +23,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -305,6 +306,13 @@ class MainActivity : Activity() {
         addView(r, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
     }
 
+    private fun navIcon(t: Tab): Int = when (t) {
+        Tab.HOME -> R.drawable.ic_nav_home
+        Tab.CONSOLE -> R.drawable.ic_nav_console
+        Tab.MODS -> R.drawable.ic_nav_mods
+        Tab.SETTINGS -> R.drawable.ic_nav_settings
+    }
+
     private fun navBar(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -319,8 +327,13 @@ class MainActivity : Activity() {
                 // fila entera clicable: diana de toque de 48dp+, no solo el texto
                 setOnClickListener { if (!active) goto(t) }
             }
+            item.addView(ImageView(this).apply {
+                setImageResource(navIcon(t))
+                imageTintList = android.content.res.ColorStateList.valueOf(if (active) ACCENT else FAINT)
+                contentDescription = t.label
+            }, LinearLayout.LayoutParams(px(24f), px(24f)).apply { topMargin = px(6f) })
             item.addView(tv(t.label, 12f, if (active) ACCENT else FAINT, bold = active).apply { gravity = Gravity.CENTER },
-                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f); bottomMargin = px(8f) })
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f); bottomMargin = px(8f) })
             bar.addView(item, LinearLayout.LayoutParams(0, -2, 1f))
         }
         return bar
@@ -526,9 +539,11 @@ class MainActivity : Activity() {
         // ── estado ──
         // Sin rótulos: el nombre de la app ya está en el launcher. Una línea
         // que responde "¿está encendido?" y nada más.
-        col.addView(tv("${if (running) "Encendido" else "Apagado"} · $loader $version", 15f,
+        col.addView(tv(if (running) "Encendido" else "Apagado", 15f,
             if (running) ACCENT else MUTED, bold = true),
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
+        col.addView(tv("$loader $version", 12.5f, MUTED),
+            LinearLayout.LayoutParams(-1, -2))
         if (err.isNotEmpty()) {
             col.addView(tv(err, 12.5f, WARN).apply { maxLines = 2 }, LinearLayout.LayoutParams(-1, -2).apply {
                 topMargin = px(8f) })
