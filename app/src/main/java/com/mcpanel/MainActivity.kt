@@ -609,7 +609,6 @@ class MainActivity : Activity() {
     // filas Software/Mundos con "Cambiar", dirección tap=copiar.
     private fun homeBody(st: JSONObject): View {
         val col = col()
-        col.addHeader("Inicio")
         val running = st.optBoolean("running")
         val loader = prettyLoader(sval(st, "loader"))
         val version = sval(st, "version")
@@ -624,63 +623,88 @@ class MainActivity : Activity() {
         val needsClaim = playit?.optBoolean("needs_claim") == true
         val linked = playit?.optBoolean("secret") == true
 
-        // ── banner de estado (la pastilla ES el estado) ──
+        // ── héroe: la dirección MANDA (como Aternos). Estado + uptime en
+        // una banda de color real; software vive SOLO en Software. ──
+        col.addView(tv(pAddr?.takeIf { claimed } ?: lanIp()?.let { "$it:$port" } ?: "Sin dirección todavía", 22f,
+            if (claimed) ACCENT else TEXT, bold = true, mono = true).apply {
+            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+            setOnClickListener { pAddr?.takeIf { claimed }?.let { a -> copy(a) } }
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         val startedAt = st.optLong("started_at", 0L)
-        val banner = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        val statusLine = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             background = rounded(if (running) OK_BG else OFF_BG, RADIUS)
-            setPadding(px(16f), px(14f), px(16f), px(14f))
+            setPadding(px(14f), px(10f), px(14f), px(10f))
         }
-        banner.addView(tv("${dot(running)} ${if (running) "Encendido" else "Apagado"}", 15f,
-            if (running) ACCENT else MUTED, bold = true))
+        statusLine.addView(tv("${dot(running)} ${if (running) "Online" else "Apagado"}", 14f,
+            if (running) ACCENT else MUTED, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
         if (running && startedAt > 0) {
             val up = (System.currentTimeMillis() / 1000) - startedAt
-            val h = up / 3600; val m = (up % 3600) / 60
-            banner.addView(tv(String.format("%dh %02dm", h, m), 13f, FAINT, mono = true), LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(12f); gravity = Gravity.CENTER_VERTICAL })
+            statusLine.addView(tv(String.format("%dh %02dm", up / 3600, (up % 3600) / 60), 13f, FAINT, mono = true), LinearLayout.LayoutParams(-2, -2))
         }
-        col.addView(banner, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
-        col.addView(tv("$loader $version", 12.5f, MUTED),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f); gravity = Gravity.CENTER })
+        col.addView(statusLine, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         if (err.isNotEmpty()) {
             col.addView(tv(err, 12.5f, WARN).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END },
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         }
 
-        // ── controles: Encender/Apagar + Reiniciar (como Aternos) ──
+        // ── controles: dos botones grandes lado a lado (Aternos) ──
+        val ctrlRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun bigBtn(label: String, s: Style, enabled: Boolean, block: () -> Unit): Button {
+            val b = Button(this).apply { isAllCaps = false }
+            styleBtn(b, s, label, enabled)
+            b.textSize = 15f
+            b.setOnClickListener { block() }
+            return b
+        }
         if (running) {
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            fun half(label: String, s: Style, enabled: Boolean, block: () -> Unit): Button {
-                val b = Button(this).apply { isAllCaps = false }
-                styleBtn(b, s, label, enabled)
-                b.textSize = 14.5f
-                b.setOnClickListener { block() }
-                return b
-            }
-            row.addView(half(if (serverBusy) (busyText ?: "…") else "Apagar", Style.DANGER, !serverBusy) { toggleServer() },
-                LinearLayout.LayoutParams(0, px(52f), 1f).apply { topMargin = px(16f); marginEnd = px(6f) })
-            val restart = half("Reiniciar", Style.SECONDARY, !actionBusy) {
-                if (actionBusy) { toast("Espera a que termine la acción actual."); return@half }
+            ctrlRow.addView(bigBtn(if (serverBusy) (busyText ?: "…") else "Apagar", Style.DANGER, !serverBusy) { toggleServer() },
+                LinearLayout.LayoutParams(0, px(54f), 1f).apply { topMargin = px(16f); marginEnd = px(6f) })
+            val restartBtn = bigBtn("Reiniciar", Style.SECONDARY, !actionBusy) {
+                if (actionBusy) { toast("Espera a que termine la acción actual."); return@bigBtn }
                 runWithBusy("server", "Reiniciando…", { runTermux("restart") },
                     { readState()?.optBoolean("running") == true })
             }
-            row.addView(restart, LinearLayout.LayoutParams(0, px(52f), 1f).apply { topMargin = px(16f); marginStart = px(6f) })
-            col.addView(row, LinearLayout.LayoutParams(-1, -2))
+            ctrlRow.addView(restartBtn, LinearLayout.LayoutParams(0, px(54f), 1f).apply { topMargin = px(16f); marginStart = px(6f) })
+            col.addView(ctrlRow, LinearLayout.LayoutParams(-1, -2))
         } else {
-            col.addBtn(if (serverBusy) (busyText ?: "…") else "Encender", Style.PRIMARY,
-                enabled = !serverBusy, marginTop = 16f) { toggleServer() }
+            col.addView(bigBtn(if (serverBusy) (busyText ?: "…") else "Encender", Style.PRIMARY, !serverBusy) { toggleServer() },
+                LinearLayout.LayoutParams(-1, px(54f)).apply { topMargin = px(16f) })
         }
 
-        // ── gestión: software, mundo, respaldos (filas con chevron) ──
-        col.addView(tv("Gestión", 11f, FAINT, bold = true, ls = 0.06f),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f) })
-        col.addView(View(this), LinearLayout.LayoutParams(-1, px(8f)))
-        col.addRow("Software", "$loader $version", ACCENT, marginTop = 0f) { openSoftwareDialog(st) }
-        col.addRow("Mundos", activeWorldLabel(st), MUTED, marginTop = 0f) { openWorldsPanel() }
-        col.addRow("Respaldos", backupsLabel(), MUTED, marginTop = 0f) { openBackupsPanel() }
+        // ── grid de gestión (2 columnas, estilo Aternos): icono + etiqueta.
+        // El valor de Software/Mundos vive DENTRO del panel, no aquí. ──
+        fun tile(label: String, value: String?, icon: String, danger: Boolean = false, onClick: () -> Unit): LinearLayout {
+            val t = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = rounded(CARD, RADIUS, STROKE, 1)
+                setPadding(px(14f), px(12f), px(14f), px(12f))
+                setOnClickListener { onClick() }
+            }
+            t.addView(tv(icon, 16f, if (danger) DANGER else ACCENT, bold = true))
+            t.addView(tv(label, 14.5f, if (danger) DANGER else TEXT, bold = true).apply { setPadding(0, px(6f), 0, 0) })
+            if (value != null) t.addView(tv(value, 11.5f, FAINT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, px(2f), 0, 0) })
+            return t
+        }
+        val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val gridR1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val gridR2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val tiles1 = listOf(
+            tile("Consola", null, ">_") { goto(Tab.CONSOLE) },
+            tile("Software", "$loader $version", "⚙") { openSoftwareDialog(st) },
+            tile("Mundos", activeWorldLabel(st), "◉") { openWorldsPanel() },
+            tile("Respaldos", backupsLabel(), "▣") { openBackupsPanel() }
+        )
+        tiles1.forEachIndexed { i, t ->
+            val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { topMargin = px(16f); marginStart = px(if (i % 2 == 1) 6f else 0f); marginEnd = px(if (i % 2 == 0) 6f else 0f) }
+            (if (i < 2) gridR1 else gridR2).addView(t, lp)
+        }
+        grid.addView(gridR1)
+        grid.addView(gridR2)
+        col.addView(grid, LinearLayout.LayoutParams(-1, -2))
 
-        // ── dirección: la dirección ES el botón (tap = copiar) ──
-        col.addView(tv("Dirección", 11f, FAINT, bold = true, ls = 0.06f),
+        // ── túnel (dirección de red pública) ──
+        col.addView(tv("Túnel", 11f, FAINT, bold = true, ls = 0.06f),
             LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f) })
         col.addView(View(this), LinearLayout.LayoutParams(-1, px(8f)))
         when {
@@ -735,16 +759,9 @@ class MainActivity : Activity() {
                     Triple("Escribir dirección", ACCENT, { openAddressDialog() }))
             }
             else -> {
-                val lan = lanIp()
-                if (lan != null) {
-                    val lanTv = tv("$lan:$port", 14f, MUTED, bold = true, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }
-                    lanTv.background = rounded(SURFACE, RADIUS, STROKE, 1)
-                    lanTv.setPadding(px(16f), px(12f), px(16f), px(12f))
-                    lanTv.setOnClickListener { copy("$lan:$port") }
-                    col.addView(lanTv, LinearLayout.LayoutParams(-1, -2))
-                    col.addView(tv("Solo esta Wi-Fi — usa playit.gg para jugar desde fuera", 11f, FAINT),
-                        LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
-                }
+                // La LAN ya vive en el héroe; aquí solo el túnel público.
+                col.addView(tv("La dirección de arriba funciona solo en tu Wi-Fi. Con playit.gg tus amigos entran desde cualquier parte.", 12.5f, MUTED),
+                    LinearLayout.LayoutParams(-1, -2))
                 col.addLinks(Triple(if (tunnelBusy) (busyText ?: "…") else "Conectar con playit.gg",
                     if (tunnelBusy) FAINT else ACCENT, {
                     if (actionBusy) { toast("Espera a que termine la acción actual."); return@Triple }
@@ -1402,7 +1419,6 @@ class MainActivity : Activity() {
 
     // ── diálogo: cambiar RAM ──────────────────────────────────────────
     private fun openRamDialog(st: JSONObject) {
-        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
         fun field(value: String): EditText = EditText(this).apply {
             setText(value); setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
@@ -1411,25 +1427,23 @@ class MainActivity : Activity() {
         }
         val minE = field(sval(st, "ram_min"))
         val maxE = field(sval(st, "ram_max"))
-        wrap.addView(tv("Mínima", 12f, MUTED))
-        wrap.addView(minE, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(4f); bottomMargin = px(10f) })
-        wrap.addView(tv("Máxima", 12f, MUTED))
-        wrap.addView(maxE, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(4f) })
-        wrap.addView(tv("Ejemplos: 512M, 1G, 2G, 1500M. La mínima es lo que reserva al arrancar; la máxima, el techo.", 11.5f, FAINT),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
-        AlertDialog.Builder(this)
-            .setTitle("RAM del servidor")
-            .setView(ScrollView(this).apply { addView(wrap) })
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Guardar") { _, _ ->
+        panel("RAM del servidor") {
+            addView(tv("Mínima", 12f, MUTED))
+            addView(minE, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(4f); bottomMargin = px(12f) })
+            addView(tv("Máxima", 12f, MUTED))
+            addView(maxE, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(4f) })
+            addView(tv("Ejemplos: 512M, 1G, 2G, 1500M. La mínima es lo que reserva al arrancar; la máxima, el techo.", 11.5f, FAINT),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(12f) })
+            panelBtn("Guardar", Style.PRIMARY) {
                 val min = minE.text.toString().trim()
                 val max = maxE.text.toString().trim()
                 val ok = Regex("[0-9]+[MG]").matches(min) && Regex("[0-9]+[MG]").matches(max)
-                if (!ok) { toast("Formato inválido (ej. 512M o 1G)."); return@setPositiveButton }
+                if (!ok) { toast("Formato inválido (ej. 512M o 1G)."); return@panelBtn }
                 runTermux("ram-set", min, max)
                 toast("Guardado: aplica al reiniciar el servidor.")
                 scope.launch { delay(1200); if (tab == Tab.SETTINGS) render() }
-            }.show()
+            }
+        }
     }
 
     // ── diálogo: editar server.properties ─────────────────────────────
@@ -1440,7 +1454,6 @@ class MainActivity : Activity() {
     } catch (_: Exception) { "" }
 
     private fun openPropsDialog() {
-        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
         fun field(hint: String, key: String): EditText = EditText(this).apply {
             setText(propValue(key)); this.hint = hint; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
@@ -1460,23 +1473,20 @@ class MainActivity : Activity() {
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
-        fun row(lbl: String, et: EditText) {
-            wrap.addView(tv(lbl, 12f, MUTED).apply { setPadding(0, px(10f), 0, 0) })
-            wrap.addView(et, LinearLayout.LayoutParams(-1, px(44f)).apply { topMargin = px(4f) })
-        }
-        row("Modo de juego", gamemode)
-        row("Dificultad", difficulty)
-        row("Jugadores máximos", maxPlayers)
-        row("PvP", pvp)
-        row("Distancia de visión", viewDistance)
-        row("Mensaje (MOTD)", motd)
-        row("Modo online", online)
-        row("Cualquier otra propiedad", extra)
-        AlertDialog.Builder(this)
-            .setTitle("Propiedades del servidor")
-            .setView(ScrollView(this).apply { addView(wrap) })
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Guardar") { _, _ ->
+        panel("Propiedades del servidor") {
+            fun row(lbl: String, et: EditText) {
+                addView(tv(lbl, 12f, MUTED).apply { setPadding(0, px(10f), 0, 0) })
+                addView(et, LinearLayout.LayoutParams(-1, px(44f)).apply { topMargin = px(4f) })
+            }
+            row("Modo de juego", gamemode)
+            row("Dificultad", difficulty)
+            row("Jugadores máximos", maxPlayers)
+            row("PvP", pvp)
+            row("Distancia de visión", viewDistance)
+            row("Mensaje (MOTD)", motd)
+            row("Modo online", online)
+            row("Cualquier otra propiedad", extra)
+            panelBtn("Guardar", Style.PRIMARY) {
                 val pairs = mutableListOf<String>()
                 fun put(v: String, k: String) { if (v.isNotEmpty()) { pairs.add(k); pairs.add(v) } }
                 put(gamemode.text.toString().trim(), "gamemode")
@@ -1489,13 +1499,14 @@ class MainActivity : Activity() {
                 val ex = extra.text.toString().trim()
                 if (ex.isNotEmpty()) {
                     val i = ex.indexOf('=')
-                    if (i <= 0) { toast("Propiedad extra: usa formato clave=valor."); return@setPositiveButton }
+                    if (i <= 0) { toast("Propiedad extra: usa formato clave=valor."); return@panelBtn }
                     pairs.add(ex.substring(0, i).trim()); pairs.add(ex.substring(i + 1).trim())
                 }
-                if (pairs.isEmpty()) { toast("No hay nada que guardar."); return@setPositiveButton }
+                if (pairs.isEmpty()) { toast("No hay nada que guardar."); return@panelBtn }
                 runTermux("prop", *pairs.toTypedArray())
                 toast("Guardado: aplica al reiniciar el servidor.")
-            }.show()
+            }
+        }
     }
 
     // ── batería ───────────────────────────────────────────────────────
