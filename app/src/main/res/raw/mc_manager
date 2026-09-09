@@ -892,12 +892,17 @@ playit_digest() {
     { [ "$CC" = "null" ] || [ -z "$CC" ]; } && CCJ=null || CCJ="\"$CC\""
     [ "$NC" = "true" ] && NCJ=true || NCJ=false
     [ "$MAN" = "true" ] && MJ=true || MJ=false
-    [ "$RUN" != "true" ] && MJ=false
+    # Manual address survives daemon restarts while still linked: it is
+    # user-provided DNS, not a live-discovered value. Previously MJ was
+    # forced false when RUN=false, so every periodic `status` (KeepAlive
+    # every 12s) wiped the address after a reboot/app-kill and the UI
+    # fell back to the LAN IP when switching tabs. Only explicit
+    # playit-stop / unlink clears it (see those commands).
     CURA=$(state_field .playit.address); CURC=$(state_field .playit.claimed)
     { [ "$CURA" = "null" ] || [ -z "$CURA" ]; } && CURAJ=null || CURAJ="\"$CURA\""
     case "$CURC" in true) CURCJ=true;; false) CURCJ=false;; *) CURCJ=null;; esac
     local upd=".playit.running = $RUN .playit.secret = $SJ .playit.claim_url = $CUJ .playit.claim_code = $CCJ .playit.needs_claim = $NCJ .playit.manual = $MJ"
-    if [ "$MJ" = "true" ] && [ "$RUN" = "true" ]; then
+    if [ "$MJ" = "true" ] && [ "$CURAJ" != "null" ] && { [ "$SJ" = "true" ] || [ "$S" = "true" ]; }; then
         # manual address: keep stored values, never null them from empty sources
         upd="$upd .playit.claimed = $CURCJ .playit.address = $CURAJ"
     elif [ -n "$ADDR" ]; then
@@ -1093,7 +1098,7 @@ cmd_playit_unlink() {
     local CLI; CLI=$(playit_cli 2>/dev/null) && "$CLI" reset >>"$INSTALL_LOG" 2>&1 || true
     rm -f "$HOME_DIR/.config/playit_gg/playit.toml" "$HOME_DIR/.playit-exchange.out"
     playit_digest
-    write_state '.playit.secret = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
+    write_state '.playit.secret = false .playit.address = null .playit.claimed = null .playit.manual = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
     log "OK" "playit-unlink: desvinculado"
 }
 
@@ -1150,7 +1155,9 @@ cmd_playit_debug() {
 cmd_playit_stop() {
     tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
     playit_digest
-    write_state '.last_action = "playit-stop" .last_error = null'
+    # Explicit stop clears the manual address too (digest now preserves
+    # it while linked, so clear here on purpose).
+    write_state '.playit.address = null .playit.claimed = null .playit.manual = false .last_action = "playit-stop" .last_error = null'
     log "OK" "playit-stop: session down"
 }
 

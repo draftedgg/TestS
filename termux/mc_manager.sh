@@ -588,7 +588,23 @@ cmd_restart() {
 cmd_status() {
     refresh_running_state
     playit_digest
+    state_sync_worlds
     log "INF" "status: refreshed"
+}
+
+# Mirror the world list into state.json (.worlds = ["name:active", ...])
+# so the app can render the Worlds panel without reading stdout.
+state_sync_worlds() {
+    local list="["
+    local first=1 line name st
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        name=${line%%|*}; st=${line##*|}
+        if [ "$first" = "1" ]; then first=0; else list="$list,"; fi
+        list="$list{\"name\":\"$name\",\"active\":$( [ "$st" = "active" ] && echo true || echo false )}"
+    done < <(mc_list_worlds 2>/dev/null)
+    list="$list]"
+    write_state ".worlds = $list"
 }
 
 cmd_send() {
@@ -616,6 +632,87 @@ cmd_backup() {
     [ "$C" -gt 5 ] && ls -t "$BACKUP_DIR"/*.tar.gz | tail -n +6 | xargs rm -f
     write_state ".last_action = \"backup\" .last_error = null"
     log "OK" "backup: server_$TS.tar.gz"
+}
+
+# Delete one backup archive (by filename; path-traversal guarded):
+#   backup-delete server_20260908_120000.tar.gz
+cmd_backup_delete() {
+    local F="${1:-}"
+    case "$F" in ""|*/*|*.""|server_*.tar.gz) ;; *) state_set_error "backup-delete: nombre inválido"; exit 1 ;; esac
+    [ -f "$BACKUP_DIR/$F" ] || { state_set_error "backup-delete: no existe $F"; exit 1; }
+    rm -f "$BACKUP_DIR/$F"
+    write_state '.last_action = "backup-delete" .last_error = null'
+    log "OK" "backup-delete: $F"
+}
+
+# Restore a backup INTO the server dir (world + properties come back).
+# Refuses while the server is running: restoring live corrupts the world.
+#   backup-restore server_20260908_120000.tar.gz
+cmd_backup_restore() {
+    local F="${1:-}"
+    case "$F" in ""|*/*|server_*.tar.gz) ;; *) state_set_error "backup-restore: nombre inválido"; exit 1 ;; esac
+    [ -f "$BACKUP_DIR/$F" ] || { state_set_error "backup-restore: no existe $F"; exit 1; }
+    if server_running 2>/dev/null; then
+        state_set_error "backup-restore: apaga el servidor antes de restaurar"
+        exit 1
+    fi
+    [ -d "$SERVER_DIR" ] || { state_set_error "backup-restore: no hay servidor instalado"; exit 1; }
+    log "INF" "backup-restore: $F"
+    tar -xzf "$BACKUP_DIR/$F" -C "$SERVER_DIR" 2>>"$INSTALL_LOG" \
+      || { state_set_error "backup-restore: el archivo está dañado (revisa install.log)"; exit 1; }
+    write_state '.last_action = "backup-restore" .last_error = null'
+    log "OK" "backup-restore: $F restaurado"
+}
+
+# List worlds (top-level dirs in the server dir containing level.dat).
+# Prints one name per line; the active one is whatever level-name says.
+mc_list_worlds() {
+    local LN="world"
+    [ -f "$SERVER_DIR/server.properties" ] && LN=$(grep -E '^level-name=' "$SERVER_DIR/server.properties" | head -1 | cut -d= -f2-)
+    LN=${LN:-world}
+    local d b
+    for d in "$SERVER_DIR"/*/; do
+        [ -d "$d" ] || continue
+        [ -f "$d/level.dat" ] || continue
+        b=$(basename "$d")
+        echo "$b|$([ "$b" = "$LN" ] && echo active || echo idle)"
+    done
+}
+
+# Delete a world dir by name. The ACTIVE world is refused (stop the server
+# and switch level-name first) — that is the one the server would recreate.
+#   world-delete <name>
+cmd_world_delete() {
+    local W="${1:-}"
+    case "$W" in ""|*/*|.*) state_set_error "world-delete: nombre inválido"; exit 1 ;; esac
+    local LN="world"
+    [ -f "$SERVER_DIR/server.properties" ] && LN=$(grep -E '^level-name=' "$SERVER_DIR/server.properties" | head -1 | cut -d= -f2-)
+    if [ "$W" = "$LN" ]; then
+        state_set_error "world-delete: $W es el mundo activo (cambia de mundo primero)"
+        exit 1
+    fi
+    case "$W" in world|world_nether|world_the_end) ;; esac   # allow: these are only active if level-name says so
+    [ -d "$SERVER_DIR/$W" ] || { state_set_error "world-delete: no existe $W"; exit 1; }
+    [ -f "$SERVER_DIR/$W/level.dat" ] || { state_set_error "world-delete: $W no parece un mundo"; exit 1; }
+    rm -rf "$SERVER_DIR/$W"
+    state_sync_worlds
+    write_state '.last_action = "world-delete" .last_error = null'
+    log "OK" "world-delete: $W"
+}
+
+# Switch the active world (edits level-name; applies on next start).
+#   world-use <name>
+cmd_world_use() {
+    local W="${1:-}"
+    case "$W" in ""|*/*|.*) state_set_error "world-use: nombre inválido"; exit 1 ;; esac
+    [ -d "$SERVER_DIR/$W" ] && [ -f "$SERVER_DIR/$W/level.dat" ] || { state_set_error "world-use: no existe el mundo $W"; exit 1; }
+    if server_running 2>/dev/null; then
+        state_set_error "world-use: apaga el servidor antes de cambiar de mundo"
+        exit 1
+    fi
+    cmd_prop level-name "$W"
+    state_sync_worlds
+    log "OK" "world-use: $W activo tras reiniciar"
 }
 
 cmd_mod_install() {
@@ -795,12 +892,17 @@ playit_digest() {
     { [ "$CC" = "null" ] || [ -z "$CC" ]; } && CCJ=null || CCJ="\"$CC\""
     [ "$NC" = "true" ] && NCJ=true || NCJ=false
     [ "$MAN" = "true" ] && MJ=true || MJ=false
-    [ "$RUN" != "true" ] && MJ=false
+    # Manual address survives daemon restarts while still linked: it is
+    # user-provided DNS, not a live-discovered value. Previously MJ was
+    # forced false when RUN=false, so every periodic `status` (KeepAlive
+    # every 12s) wiped the address after a reboot/app-kill and the UI
+    # fell back to the LAN IP when switching tabs. Only explicit
+    # playit-stop / unlink clears it (see those commands).
     CURA=$(state_field .playit.address); CURC=$(state_field .playit.claimed)
     { [ "$CURA" = "null" ] || [ -z "$CURA" ]; } && CURAJ=null || CURAJ="\"$CURA\""
     case "$CURC" in true) CURCJ=true;; false) CURCJ=false;; *) CURCJ=null;; esac
     local upd=".playit.running = $RUN .playit.secret = $SJ .playit.claim_url = $CUJ .playit.claim_code = $CCJ .playit.needs_claim = $NCJ .playit.manual = $MJ"
-    if [ "$MJ" = "true" ] && [ "$RUN" = "true" ]; then
+    if [ "$MJ" = "true" ] && [ "$CURAJ" != "null" ] && { [ "$SJ" = "true" ] || [ "$S" = "true" ]; }; then
         # manual address: keep stored values, never null them from empty sources
         upd="$upd .playit.claimed = $CURCJ .playit.address = $CURAJ"
     elif [ -n "$ADDR" ]; then
@@ -996,7 +1098,7 @@ cmd_playit_unlink() {
     local CLI; CLI=$(playit_cli 2>/dev/null) && "$CLI" reset >>"$INSTALL_LOG" 2>&1 || true
     rm -f "$HOME_DIR/.config/playit_gg/playit.toml" "$HOME_DIR/.playit-exchange.out"
     playit_digest
-    write_state '.playit.secret = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
+    write_state '.playit.secret = false .playit.address = null .playit.claimed = null .playit.manual = false .playit.claim_url = null .playit.claim_code = null .playit.needs_claim = false .last_action = "playit-unlink" .last_error = null'
     log "OK" "playit-unlink: desvinculado"
 }
 
@@ -1053,7 +1155,9 @@ cmd_playit_debug() {
 cmd_playit_stop() {
     tmux kill-session -t "$PLAYIT_SESSION" 2>/dev/null
     playit_digest
-    write_state '.last_action = "playit-stop" .last_error = null'
+    # Explicit stop clears the manual address too (digest now preserves
+    # it while linked, so clear here on purpose).
+    write_state '.playit.address = null .playit.claimed = null .playit.manual = false .last_action = "playit-stop" .last_error = null'
     log "OK" "playit-stop: session down"
 }
 
@@ -1080,8 +1184,13 @@ case "$CMD" in
     stop)           cmd_stop "$@" ;;
     restart)        cmd_restart "$@" ;;
     status)         cmd_status "$@" ;;
+    world-list)     state_sync_worlds ;;
     send)           cmd_send "$@" ;;
     backup)         cmd_backup "$@" ;;
+    backup-delete)   cmd_backup_delete "$@" ;;
+    backup-restore)  cmd_backup_restore "$@" ;;
+    world-delete)    cmd_world_delete "$@" ;;
+    world-use)       cmd_world_use "$@" ;;
     mod-install)    cmd_mod_install "$@" ;;
     mod-remove)     cmd_mod_remove "$@" ;;
     prop)           cmd_prop "$@" ;;

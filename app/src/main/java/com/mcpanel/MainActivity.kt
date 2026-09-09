@@ -1,12 +1,10 @@
 package com.mcpanel
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.DialogInterface
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -124,9 +122,6 @@ class MainActivity : Activity() {
     private val ACCENT_FAINT = Color.argb(38, 46, 229, 157)   // acento al 15%: pill del tab activo
     private val RADIUS = 16f
     private val RADIUS_SM = 12f
-
-    /** Viñeta de estado: ● vivo / ○ apagado, siempre pegada al dato. */
-    private fun dot(on: Boolean): String = if (on) "●" else "○"
 
     private enum class Style { PRIMARY, SECONDARY, DANGER, DANGER_TEXT, GHOST, PLAIN }
 
@@ -429,7 +424,7 @@ class MainActivity : Activity() {
 
     private fun copy(value: String) {
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("MCPanel", value))
-        toast("Copiado: $value")
+        toast("Copied")
     }
 
     private fun open(url: String) {
@@ -550,16 +545,15 @@ class MainActivity : Activity() {
     private fun appVersion(): String = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
 
     private fun showLogDialog(title: String, file: File) {
-        val body = TextView(this).apply {
-            text = try { file.readText().takeLast(30000) } catch (_: Exception) { "(sin contenido)" }
-            textSize = 11f; setTextColor(Color.rgb(160, 170, 185)); typeface = Typeface.MONOSPACE
+        panel(title) {
+            val body = TextView(this@MainActivity).apply {
+                text = try { file.readText().takeLast(30000) } catch (_: Exception) { "(vacío)" }
+                textSize = 11f; setTextColor(Color.rgb(160, 170, 185)); typeface = Typeface.MONOSPACE
+            }
+            addView(ScrollView(this@MainActivity).apply { addView(body) },
+                LinearLayout.LayoutParams(-1, px(320f)).apply { topMargin = px(8f) })
+            panelBtn("Cerrar", Style.SECONDARY) {}
         }
-        val sc = ScrollView(this).apply { addView(body) }
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(sc)
-            .setPositiveButton("Cerrar", null)
-            .show()
     }
 
     private val serverBusy: Boolean get() = actionBusy && busyKind == "server"
@@ -597,16 +591,19 @@ class MainActivity : Activity() {
 
     private fun toggleServer() {
         if (serverBusy) return
-        if (actionBusy) { toast("Espera a que termine la acción actual."); return }
+        if (actionBusy) { toast("Wait…"); return }
         val want = readState()?.optBoolean("running") != true
-        runWithBusy("server", if (want) "Iniciando…" else "Deteniendo…",
+        runWithBusy("server", if (want) "Starting…" else "Stopping…",
             { runTermux(if (want) "start" else "stop") },
             { (readState()?.optBoolean("running") == true) == want })
     }
 
     // ═══════════════════════════ PÁGINA: INICIO ═════════════════════
-    // Estilo Aternos adaptado a M3E: banner de estado, controles grandes,
-    // filas Software/Mundos con "Cambiar", dirección tap=copiar.
+    // Aternos adapted: hero address (tap=copy), full-width status banner
+    // (Offline red / Starting grey / Online green), centered Start /
+    // Stop+Restart, Address card with Copy, 2x2 management grid.
+    // No Consola tile (already a tab). No tunnel essay: tunnel lives as
+    // one tile + one Address card; full claim/admin lives in Ajustes.
     private fun homeBody(st: JSONObject): View {
         val col = col()
         val running = st.optBoolean("running")
@@ -619,165 +616,161 @@ class MainActivity : Activity() {
         val pAddr = playit?.optString("address", "")?.takeIf { it.isNotEmpty() && it != "null" }
         val claimed = pAddr != null && !pAddr.startsWith("http")
         val claimUrl = pAddr?.takeIf { !claimed }
-        val stateClaimUrl = playit?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" }
-        val needsClaim = playit?.optBoolean("needs_claim") == true
+            ?: playit?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" }
+        val needsClaim = playit?.optBoolean("needs_claim") == true || claimUrl != null
         val linked = playit?.optBoolean("secret") == true
+        val heroAddr = pAddr?.takeIf { claimed }
+            ?: lanIp()?.let { "$it:$port" }
 
-        // ── héroe: la dirección MANDA (como Aternos). Estado + uptime en
-        // una banda de color real; software vive SOLO en Software. ──
-        col.addView(tv(pAddr?.takeIf { claimed } ?: lanIp()?.let { "$it:$port" } ?: "Sin dirección todavía", 22f,
+        // ── hero: address rules (Aternos centers it). Tap = copy. ──
+        col.addView(tv(heroAddr ?: "No address yet", 22f,
             if (claimed) ACCENT else TEXT, bold = true, mono = true).apply {
             maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-            setOnClickListener { pAddr?.takeIf { claimed }?.let { a -> copy(a) } }
+            gravity = Gravity.CENTER
+            setOnClickListener { heroAddr?.let { a -> copy(a) } }
         }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+
+        // ── status banner: full-width, Aternos colours ──
         val startedAt = st.optLong("started_at", 0L)
-        val statusLine = LinearLayout(this).apply {
+        val bannerBg = when {
+            serverBusy -> Color.rgb(66, 72, 82)
+            running -> Color.rgb(67, 160, 71)
+            else -> Color.rgb(183, 28, 28)
+        }
+        val bannerFg = Color.WHITE
+        val banner = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            background = rounded(if (running) OK_BG else OFF_BG, RADIUS)
-            setPadding(px(14f), px(10f), px(14f), px(10f))
+            background = rounded(bannerBg, RADIUS_SM)
+            setPadding(px(14f), px(12f), px(14f), px(12f))
         }
-        statusLine.addView(tv("${dot(running)} ${if (running) "Online" else "Apagado"}", 14f,
-            if (running) ACCENT else MUTED, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-        if (running && startedAt > 0) {
+        val statusTxt = when {
+            serverBusy -> busyText ?: "Starting…"
+            running -> "Online"
+            else -> "Offline"
+        }
+        banner.addView(tv("● $statusTxt", 15f, bannerFg, bold = true),
+            LinearLayout.LayoutParams(0, -2, 1f))
+        if (running && startedAt > 0 && !serverBusy) {
             val up = (System.currentTimeMillis() / 1000) - startedAt
-            statusLine.addView(tv(String.format("%dh %02dm", up / 3600, (up % 3600) / 60), 13f, FAINT, mono = true), LinearLayout.LayoutParams(-2, -2))
+            banner.addView(tv(String.format("%d:%02d", up / 3600, (up % 3600) / 60),
+                13f, bannerFg, bold = true, mono = true),
+                LinearLayout.LayoutParams(-2, -2))
         }
-        col.addView(statusLine, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+        col.addView(banner, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(12f) })
         if (err.isNotEmpty()) {
             col.addView(tv(err, 12.5f, WARN).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END },
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         }
 
-        // ── controles: dos botones grandes lado a lado (Aternos) ──
-        val ctrlRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun bigBtn(label: String, s: Style, enabled: Boolean, block: () -> Unit): Button {
+        // ── controls: centered, Aternos style ──
+        fun bigBtn(label: String, fill: Int, fg: Int, enabled: Boolean, w: Int, block: () -> Unit): Button {
             val b = Button(this).apply { isAllCaps = false }
-            styleBtn(b, s, label, enabled)
-            b.textSize = 15f
+            b.text = label; b.isEnabled = enabled; b.alpha = if (enabled) 1f else 0.45f
+            b.textSize = 16f; b.typeface = Typeface.DEFAULT_BOLD; b.setTextColor(fg)
+            b.background = rounded(fill, RADIUS_SM); b.minHeight = 0
+            b.setPadding(px(24f), 0, px(24f), 0)
             b.setOnClickListener { block() }
             return b
         }
+        val START_GREEN = Color.rgb(67, 160, 71)
+        val STOP_RED = Color.rgb(183, 28, 28)
+        val RESTART_BLUE = Color.rgb(66, 133, 244)
         if (running) {
-            ctrlRow.addView(bigBtn(if (serverBusy) (busyText ?: "…") else "Apagar", Style.DANGER, !serverBusy) { toggleServer() },
-                LinearLayout.LayoutParams(0, px(54f), 1f).apply { topMargin = px(16f); marginEnd = px(6f) })
-            val restartBtn = bigBtn("Reiniciar", Style.SECONDARY, !actionBusy) {
-                if (actionBusy) { toast("Espera a que termine la acción actual."); return@bigBtn }
-                runWithBusy("server", "Reiniciando…", { runTermux("restart") },
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+            row.addView(bigBtn(if (serverBusy) (busyText ?: "…") else "Stop", STOP_RED, Color.WHITE, !serverBusy, 0) { toggleServer() },
+                LinearLayout.LayoutParams(px(140f), px(48f)).apply { marginEnd = px(8f); topMargin = px(16f) })
+            val rb = bigBtn("Restart", RESTART_BLUE, Color.WHITE, !actionBusy, 0) {
+                if (actionBusy) { toast("Wait…"); return@bigBtn }
+                runWithBusy("server", "Restarting…", { runTermux("restart") },
                     { readState()?.optBoolean("running") == true })
             }
-            ctrlRow.addView(restartBtn, LinearLayout.LayoutParams(0, px(54f), 1f).apply { topMargin = px(16f); marginStart = px(6f) })
-            col.addView(ctrlRow, LinearLayout.LayoutParams(-1, -2))
+            row.addView(rb, LinearLayout.LayoutParams(px(140f), px(48f)).apply { topMargin = px(16f) })
+            col.addView(row, LinearLayout.LayoutParams(-1, -2))
         } else {
-            col.addView(bigBtn(if (serverBusy) (busyText ?: "…") else "Encender", Style.PRIMARY, !serverBusy) { toggleServer() },
-                LinearLayout.LayoutParams(-1, px(54f)).apply { topMargin = px(16f) })
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+            row.addView(bigBtn(if (serverBusy) (busyText ?: "…") else "Start", START_GREEN, Color.WHITE, !serverBusy, 0) { toggleServer() },
+                LinearLayout.LayoutParams(px(160f), px(48f)).apply { topMargin = px(16f) })
+            col.addView(row, LinearLayout.LayoutParams(-1, -2))
         }
 
-        // ── grid de gestión (2 columnas, estilo Aternos): icono + etiqueta.
-        // El valor de Software/Mundos vive DENTRO del panel, no aquí. ──
-        fun tile(label: String, value: String?, icon: String, danger: Boolean = false, onClick: () -> Unit): LinearLayout {
+        // ── Address card (Aternos): blue tag + dark card + Copy ──
+        col.addView(tv("Address", 12f, Color.WHITE, bold = true).apply {
+            background = rounded(RESTART_BLUE, RADIUS_SM); setPadding(px(12f), px(4f), px(12f), px(4f))
+        }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = px(20f) })
+        val addrCard = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
+            setPadding(px(14f), px(10f), px(8f), px(10f))
+        }
+        when {
+            claimed -> {
+                addrCard.addView(tv(pAddr!!, 14f, TEXT, bold = true, mono = true).apply {
+                    maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                val cp = Button(this).apply { text = "Copy"; isAllCaps = false; textSize = 13f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); background = rounded(RESTART_BLUE, RADIUS_SM); minHeight = 0; setPadding(px(14f), 0, px(14f), 0); setOnClickListener { copy(pAddr!!) } }
+                addrCard.addView(cp, LinearLayout.LayoutParams(-2, px(36f)).apply { marginStart = px(8f) })
+            }
+            needsClaim && claimUrl != null -> {
+                addrCard.addView(tv("Claim pending", 14f, WARN, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
+                val open = Button(this).apply { text = "Open"; isAllCaps = false; textSize = 13f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); background = rounded(RESTART_BLUE, RADIUS_SM); minHeight = 0; setPadding(px(12f), 0, px(12f), 0); setOnClickListener { open(claimUrl) } }
+                addrCard.addView(open, LinearLayout.LayoutParams(-2, px(36f)).apply { marginStart = px(8f) })
+            }
+            else -> {
+                addrCard.addView(tv(heroAddr ?: "—", 14f, MUTED, mono = true).apply {
+                    maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                val cp = Button(this).apply { text = "Copy"; isAllCaps = false; textSize = 13f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE); background = rounded(RESTART_BLUE, RADIUS_SM); minHeight = 0; setPadding(px(14f), 0, px(14f), 0); setOnClickListener { heroAddr?.let { copy(it) } } }
+                addrCard.addView(cp, LinearLayout.LayoutParams(-2, px(36f)).apply { marginStart = px(8f) })
+            }
+        }
+        col.addView(addrCard, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(6f) })
+        // Claim confirm lives in Ajustes now (single home for tunnel flow);
+        // Inicio stays to one card, never a paragraph.
+
+        // ── grid 2x2 (no Consola tile): Software / Worlds / Backups / Tunnel ──
+        fun tile(label: String, value: String?, icon: String, onClick: () -> Unit): LinearLayout {
             val t = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 background = rounded(CARD, RADIUS, STROKE, 1)
                 setPadding(px(14f), px(12f), px(14f), px(12f))
                 setOnClickListener { onClick() }
             }
-            t.addView(tv(icon, 16f, if (danger) DANGER else ACCENT, bold = true))
-            t.addView(tv(label, 14.5f, if (danger) DANGER else TEXT, bold = true).apply { setPadding(0, px(6f), 0, 0) })
-            if (value != null) t.addView(tv(value, 11.5f, FAINT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, px(2f), 0, 0) })
+            t.addView(tv(icon, 16f, ACCENT, bold = true))
+            t.addView(tv(label, 14.5f, TEXT, bold = true).apply { setPadding(0, px(6f), 0, 0) })
+            if (!value.isNullOrEmpty()) t.addView(tv(value, 11.5f, FAINT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setPadding(0, px(2f), 0, 0) })
             return t
+        }
+        fun toggleTunnel() {
+            if (actionBusy) { toast("Wait…"); return }
+            if (pRunning) runWithBusy("tunnel", "Stopping…", { runTermux("playit-stop") },
+                { readState()?.optJSONObject("playit")?.optBoolean("running") != true })
+            else runWithBusy("tunnel", "Connecting…", { runTermux("playit-start") },
+                { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
+        }
+        val tunnelVal = when {
+            claimed -> "Linked"
+            linked -> "Linked"
+            needsClaim -> "Claim"
+            pRunning -> "Starting…"
+            else -> "Off"
         }
         val grid = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val gridR1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val gridR2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val tiles1 = listOf(
-            tile("Consola", null, ">_") { goto(Tab.CONSOLE) },
+        val tiles = listOf(
             tile("Software", "$loader $version", "⚙") { openSoftwareDialog(st) },
-            tile("Mundos", activeWorldLabel(st), "◉") { openWorldsPanel() },
-            tile("Respaldos", backupsLabel(), "▣") { openBackupsPanel() }
+            tile("Worlds", activeWorldLabel(st), "◉") { openWorldsPanel() },
+            tile("Backups", backupsLabel(), "▣") { openBackupsPanel() },
+            tile("Tunnel", tunnelVal, "⇄") {
+                if (needsClaim) goto(Tab.SETTINGS) else toggleTunnel()
+            }
         )
-        tiles1.forEachIndexed { i, t ->
-            val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { topMargin = px(16f); marginStart = px(if (i % 2 == 1) 6f else 0f); marginEnd = px(if (i % 2 == 0) 6f else 0f) }
+        tiles.forEachIndexed { i, t ->
+            val lp = LinearLayout.LayoutParams(0, -2, 1f).apply { topMargin = px(12f); marginStart = px(if (i % 2 == 1) 6f else 0f); marginEnd = px(if (i % 2 == 0) 6f else 0f) }
             (if (i < 2) gridR1 else gridR2).addView(t, lp)
         }
-        grid.addView(gridR1)
-        grid.addView(gridR2)
-        col.addView(grid, LinearLayout.LayoutParams(-1, -2))
-
-        // ── túnel (dirección de red pública) ──
-        col.addView(tv("Túnel", 11f, FAINT, bold = true, ls = 0.06f),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f) })
-        col.addView(View(this), LinearLayout.LayoutParams(-1, px(8f)))
-        when {
-            claimed -> {
-                // La dirección es el botón: tap = copiar (y toast). Sin
-                // fila de estado: "Detener túnel" ya dice que está activo.
-                val addr = tv(pAddr!!, 16f, ACCENT, bold = true, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }
-                addr.background = rounded(SURFACE, RADIUS, STROKE, 1)
-                addr.setPadding(px(16f), px(12f), px(16f), px(12f))
-                addr.setOnClickListener { copy(pAddr!!) }
-                col.addView(addr, LinearLayout.LayoutParams(-1, -2))
-            }
-            claimUrl != null -> {
-                col.addView(tv(claimUrl, 13f, ACCENT, mono = true),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(2f) })
-                col.addView(tv("Apruébalo en el navegador.", 12f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(2f) })
-                col.addLinks(
-                    Triple("Abrir enlace", ACCENT, { open(claimUrl) }),
-                    Triple("Confirmar", if (tunnelBusy) FAINT else ACCENT, {
-                        if (actionBusy) { toast("Espera a que termine la acción actual."); return@Triple }
-                        runWithBusy("tunnel", "Vinculando…", { runTermux("playit-exchange") },
-                            { readState()?.optJSONObject("playit")?.optBoolean("needs_claim") != true })
-                    }))
-            }
-            needsClaim && stateClaimUrl != null -> {
-                col.addView(tv(stateClaimUrl, 13f, ACCENT, mono = true),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(2f) })
-                col.addView(tv("Tócalo con la página abierta.", 12f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(2f) })
-                col.addLinks(
-                    Triple("Abrir enlace", ACCENT, { open(stateClaimUrl) }),
-                    Triple("Confirmar", if (tunnelBusy) FAINT else ACCENT, {
-                        if (actionBusy) { toast("Espera a que termine la acción actual."); return@Triple }
-                        runWithBusy("tunnel", "Vinculando…", { runTermux("playit-exchange") },
-                            { readState()?.optJSONObject("playit")?.optBoolean("needs_claim") != true })
-                    }))
-            }
-            pRunning && !linked -> {
-                // Daemon arriba sin vínculo: la fila de claim de arriba lo
-                // cubre. Esperar aprobación es un estado normal, no un cuelgue.
-            }
-            pRunning && linked -> {
-                // Vinculado sin dirección: estado estable, no error. Un
-                // renglón + escape manual en una línea de enlaces.
-                col.addView(tv("Vinculado, sin dirección", 14f, TEXT, bold = true))
-                col.addView(tv("Crea un Tunnel en playit.gg apuntando al puerto $port.", 12f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(2f) })
-                col.addLinks(
-                    Triple("Abrir playit.gg", ACCENT, { open("https://playit.gg/account/tunnels") }),
-                    Triple("Registro", FAINT, { showLogDialog("Registro del túnel", tunnelLog) }),
-                    Triple("Escribir dirección", ACCENT, { openAddressDialog() }))
-            }
-            else -> {
-                // La LAN ya vive en el héroe; aquí solo el túnel público.
-                col.addView(tv("La dirección de arriba funciona solo en tu Wi-Fi. Con playit.gg tus amigos entran desde cualquier parte.", 12.5f, MUTED),
-                    LinearLayout.LayoutParams(-1, -2))
-                col.addLinks(Triple(if (tunnelBusy) (busyText ?: "…") else "Conectar con playit.gg",
-                    if (tunnelBusy) FAINT else ACCENT, {
-                    if (actionBusy) { toast("Espera a que termine la acción actual."); return@Triple }
-                    runWithBusy("tunnel", "Conectando…", { runTermux("playit-start") },
-                        { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
-                }))
-            }
-        }
-        if (pRunning) {
-            col.addLinks(Triple(if (tunnelBusy) (busyText ?: "…") else "Detener túnel",
-                if (tunnelBusy) FAINT else DANGER, {
-                if (actionBusy) { toast("Espera a que termine la acción actual."); return@Triple }
-                runWithBusy("tunnel", "Deteniendo…", { runTermux("playit-stop") },
-                    { readState()?.optJSONObject("playit")?.optBoolean("running") != true })
-            }))
-        }
+        grid.addView(gridR1); grid.addView(gridR2)
+        col.addView(grid, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(4f) })
 
         pollJob?.cancel()
         pollJob = scope.launch { watchMerged() }
@@ -818,7 +811,7 @@ class MainActivity : Activity() {
         var running = st?.optBoolean("running") == true
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         head.addView(tv("Consola", 21f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-        val pillTv = pill(if (running) "${dot(true)} En vivo" else "${dot(false)} Apagado", if (running) OK_BG else OFF_BG, if (running) ACCENT else MUTED)
+        val pillTv = pill(if (running) "● Online" else "● Offline", if (running) OK_BG else OFF_BG, if (running) ACCENT else MUTED)
         head.addView(pillTv, LinearLayout.LayoutParams(-2, -2))
         root.addView(head, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
 
@@ -840,7 +833,7 @@ class MainActivity : Activity() {
         root.addView(cardWrap, LinearLayout.LayoutParams(-1, -2, 1f))
 
         // fila "seguir abajo" (aparece si el usuario hace scroll hacia arriba)
-        val followBtn = tv("↓ Ir al final", 12f, ACCENT, bold = true).apply {
+        val followBtn = tv("↓ Final", 12f, ACCENT, bold = true).apply {
             background = rounded(CARD, 100f)
             setPadding(px(12f), px(5f), px(12f), px(5f))
             visibility = View.GONE
@@ -849,7 +842,7 @@ class MainActivity : Activity() {
         root.addView(followBtn, LinearLayout.LayoutParams(-2, -2).apply { gravity = Gravity.END; topMargin = px(6f) })
 
         val input = EditText(this).apply {
-            hint = "Comando…"
+            hint = "Comando"
             setTextColor(TEXT); setHintTextColor(FAINT)
             textSize = 13f
             setBackgroundColor(Color.TRANSPARENT)
@@ -866,7 +859,7 @@ class MainActivity : Activity() {
         root.addView(inRow, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(8f) })
 
         fun send() {
-            if (!running) { toast("El servidor está apagado: inícialo desde Inicio."); return }
+            if (!running) { toast("Servidor apagado."); return }
             val c = input.text.toString().trim()
             if (c.isEmpty()) return
             runTermux("send", c)
@@ -893,7 +886,7 @@ class MainActivity : Activity() {
                 val rNow = stNow?.optBoolean("running") == true
                 if (rNow != running) {
                     running = rNow
-                    pillTv.text = if (rNow) "${dot(true)} En vivo" else "${dot(false)} Apagado"
+                    pillTv.text = if (rNow) "● Online" else "● Offline"
                     pillTv.setTextColor(if (rNow) ACCENT else MUTED)
                     pillTv.background = rounded(if (rNow) OK_BG else OFF_BG, 100f)
                 }
@@ -935,22 +928,19 @@ class MainActivity : Activity() {
     }
 
     // ═══════════════════════════ PÁGINA: MODS ═══════════════════════
-    // Lista plana: buscar (Enter), resultados, instalados. Sin tarjetas:
-    // el buscador y las listas son el contenido, no hace falta envolverlos.
     private fun modsBody(st: JSONObject): View {
         val loader = sval(st, "loader")
         val mcVersion = sval(st, "version")
         val isPlugin = loader == "paper"
-        val noun = if (isPlugin) "plugin" else "mod"
         val col = col()
         col.addHeader(if (isPlugin) "Plugins" else "Mods")
         if (mcVersion.isEmpty()) {
-            col.addView(tv("Instala un servidor primero.", color = MUTED))
+            col.addView(tv("Sin servidor.", color = MUTED))
             return sv().apply { addView(col) }
         }
 
         val query = EditText(this).apply {
-            hint = "Buscar $noun en Modrinth…"
+            hint = "Buscar en Modrinth"
             setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
@@ -963,14 +953,14 @@ class MainActivity : Activity() {
 
         fun search() {
             val q = query.text.toString().trim()
-            if (q.isEmpty()) { toast("Escribe qué buscas."); return }
+            if (q.isEmpty()) return
             results.removeAllViews()
             results.addView(tv("Buscando…", 13f, MUTED))
             scope.launch {
                 val hits = withContext(Dispatchers.IO) { Apis.modrinthSearch(q, mcVersion, loader) }
                 results.removeAllViews()
                 if (hits.isEmpty()) {
-                    results.addView(tv("Sin resultados para $mcVersion. Prueba con otro nombre o revisa la conexión.", 12.5f, MUTED))
+                    results.addView(tv("Sin resultados", 12.5f, MUTED))
                     return@launch
                 }
                 hits.forEach { h ->
@@ -987,11 +977,11 @@ class MainActivity : Activity() {
                         setOnClickListener {
                             scope.launch {
                                 val url = withContext(Dispatchers.IO) { Apis.modrinthDownloadUrl(h.slug, mcVersion, loader) }
-                                if (url == null) toast("Sin versión compatible con $mcVersion.")
+                                if (url == null) toast("No compatible.")
                                 else {
                                     val name = url.substringAfterLast('/')
                                     download(url, name, "mod-install", listOf(name))
-                                    toast("Descargando ${h.title}…")
+                                    toast("Descargando…")
                                     delay(5000)
                                     if (tab == Tab.MODS) render()
                                 }
@@ -1005,13 +995,13 @@ class MainActivity : Activity() {
         }
         query.setOnEditorActionListener { _, _, _ -> search(); true }
 
-        // instalados (plano, sin tarjeta)
-        col.addView(tv("Instalados", 11f, FAINT, bold = true, ls = 0.06f),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f); bottomMargin = px(4f) })
+        // instalados con contador
         val dest = if (isPlugin) File(Embed.serverDir(this@MainActivity), "plugins") else File(Embed.serverDir(this@MainActivity), "mods")
         val files = if (dest.exists()) dest.listFiles()?.sortedBy { it.name } else null
+        col.addView(tv("Instalados (${files?.size ?: 0})", 11f, FAINT, bold = true, ls = 0.06f),
+            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(24f); bottomMargin = px(4f) })
         if (files.isNullOrEmpty()) {
-            col.addView(tv("Nada instalado todavía: busca arriba y toca Añadir.", 12.5f, MUTED))
+            col.addView(tv("Sin instalados.", 12.5f, MUTED))
         } else {
             files.forEach { f ->
                 val row = LinearLayout(this@MainActivity).apply {
@@ -1019,17 +1009,17 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER_VERTICAL
                 }
                 row.addView(tv(f.name, 13.5f, TEXT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }, LinearLayout.LayoutParams(0, -2, 1f))
-                val del = tv("Quitar", 13f, DANGER, bold = true).apply {
+                val del = tv("Borrar", 13f, DANGER, bold = true).apply {
                     setPadding(px(10f), px(12f), px(2f), px(12f))
                     setOnClickListener {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Quitar ${f.name}")
-                            .setMessage("Se eliminará del servidor.")
-                            .setNegativeButton("Cancelar", null)
-                            .setPositiveButton("Quitar") { _, _ ->
+                        panel("¿Borrar?") {
+                            addView(tv(f.name, 13.5f, TEXT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
+                            panelBtn("Borrar", Style.DANGER) {
                                 try { f.delete() } catch (_: Exception) { }
                                 render()
-                            }.show()
+                            }
+                            panelBtn("Cancelar", Style.GHOST) {}
+                        }
                     }
                 }
                 row.addView(del, LinearLayout.LayoutParams(-2, -2))
@@ -1045,29 +1035,44 @@ class MainActivity : Activity() {
     private fun settingsBody(st: JSONObject): View {
         val col = col()
         col.addHeader("Ajustes")
-        val running = st.optBoolean("running")
-        val linked = st.optJSONObject("playit")?.optBoolean("secret") == true
+        val playit = st.optJSONObject("playit")
+        val linked = playit?.optBoolean("secret") == true
+        val claimUrl = playit?.optString("claim_url", "")?.takeIf { it.isNotEmpty() && it != "null" }
+            ?: playit?.optString("address", "")?.takeIf { it.startsWith("http") }
+        val needsClaim = playit?.optBoolean("needs_claim") == true || claimUrl != null
 
         fun section(title: String) {
             col.addView(tv(title, 11f, FAINT, bold = true, ls = 0.06f),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(20f); bottomMargin = px(2f) })
         }
 
-        // ── servidor ──
+        // ── servidor (Respaldos vive solo en Inicio, no duplicado) ──
         section("Servidor")
         col.addRow("RAM", prettyRam(sval(st, "ram_max")), ACCENT, valueMono = true, marginTop = 8f) { openRamDialog(st) }
         col.addRow("Propiedades") { openPropsDialog() }
-        col.addRow("Respaldos", backupsLabel(), MUTED, marginTop = 8f) { openBackupsPanel() }
-        if (running) col.addView(tv("RAM y propiedades aplican al reiniciar.", 11.5f, FAINT),
-            LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
 
-        // ── túnel ──
+        // ── túnel: único hogar del flujo claim/admin ──
         section("Túnel")
-        col.addRow("playit.gg", if (linked) "Vinculado" else "Sin vincular", if (linked) ACCENT else MUTED, marginTop = 8f) {
-            if (linked) openTunnelDialog(st) else {
-                runTermux("playit-start")
-                toast("Generando enlace…")
-                scope.launch { delay(2500); if (tab == Tab.SETTINGS) render() }
+        if (needsClaim && claimUrl != null && !linked) {
+            col.addView(tv(claimUrl, 13f, ACCENT, mono = true),
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
+            col.addLinks(
+                Triple("Abrir enlace", ACCENT, { open(claimUrl) }),
+                Triple("Confirmar", ACCENT, {
+                    if (actionBusy) { toast("Wait…"); return@Triple }
+                    runWithBusy("tunnel", "Linking…", { runTermux("playit-exchange") },
+                        { readState()?.optJSONObject("playit")?.optBoolean("needs_claim") != true })
+                }))
+        } else {
+            col.addRow("playit.gg", if (linked) "Linked" else "Off", if (linked) ACCENT else MUTED, marginTop = 8f) {
+                if (linked) openTunnelDialog(st) else {
+                    if (actionBusy) { toast("Wait…"); return@addRow }
+                    runWithBusy("tunnel", "Connecting…", { runTermux("playit-start") },
+                        { readState()?.optJSONObject("playit")?.optBoolean("running") == true })
+                }
+            }
+            if (linked) {
+                col.addRow("Dirección manual", "Escribir", MUTED, marginTop = 0f) { openAddressDialog() }
             }
         }
 
@@ -1084,14 +1089,14 @@ class MainActivity : Activity() {
         keepRow.addView(sw, LinearLayout.LayoutParams(-2, -2).apply { marginStart = px(10f) })
         col.addView(keepRow, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(8f) })
         if (!isBatteryIgnored()) {
-            col.addRow("Optimización de batería", "activa", WARN) { requestIgnoreBattery() }
+            col.addRow("Batería", "On", WARN) { requestIgnoreBattery() }
         }
 
         // ── aplicación ──
         section("Aplicación")
-        col.addRow("Versión", appVersion(), MUTED, valueMono = true, marginTop = 8f)
+        col.addRow("App", appVersion(), MUTED, valueMono = true, marginTop = 8f)
         if (!hasStorage()) {
-            col.addRow("Acceso a archivos", "sin acceso", WARN) { requestStorage() }
+            col.addRow("Archivos", "Off", WARN) { requestStorage() }
         }
 
         // ── peligro ──
@@ -1105,30 +1110,20 @@ class MainActivity : Activity() {
         return if (n == 0) "" else "$n"
     }
 
-    /** Túnel vinculado: diagnóstico + desvincular, sin rótulos largos. */
+    /** Túnel vinculado: diagnóstico + borrar vínculo. */
     private fun openTunnelDialog(st: JSONObject) {
-        val items = arrayOf("Diagnóstico", "Desvincular")
-        AlertDialog.Builder(this)
-            .setTitle("playit.gg")
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> {
-                        runTermux("playit-debug")
-                        toast("Generando diagnóstico…")
-                        scope.launch { delay(2000); showLogDialog("Diagnóstico playit", debugLog) }
-                    }
-                    1 -> AlertDialog.Builder(this).setTitle("Desvincular túnel")
-                        .setMessage("El túnel dejará de funcionar hasta que lo vincules de nuevo.")
-                        .setNegativeButton("Cancelar", null)
-                        .setPositiveButton("Desvincular") { _, _ ->
-                            runTermux("playit-unlink")
-                            toast("Túnel desvinculado.")
-                            scope.launch { delay(1500); render() }
-                        }.show()
-                }
+        panel("playit.gg") {
+            panelBtn("Diagnóstico", Style.SECONDARY) {
+                runTermux("playit-debug")
+                toast("Generando…")
+                scope.launch { delay(2000); showLogDialog("Diagnóstico", debugLog) }
             }
-            .setNegativeButton("Cerrar", null)
-            .show()
+            panelBtn("Borrar vínculo", Style.DANGER) {
+                runTermux("playit-unlink")
+                toast("Borrado.")
+                scope.launch { delay(1500); render() }
+            }
+        }
     }
 
     // ── panel: software (loader + versión, estilo Aternos) ──────────
@@ -1147,11 +1142,11 @@ class MainActivity : Activity() {
         val version = sval(st, "version")
         panel("Software") {
             panelRow("Software", loader, ACCENT)
-            panelRow("Versión", version, ACCENT)
-            panelRow("Mundo", activeWorldLabel(st), MUTED) { openWorldsPanel() }
-            addView(tv("Cambiar de versión reinstala el servidor. El mundo y los respaldos se conservan.", 11.5f, FAINT),
+            panelRow("Version", version, ACCENT)
+            panelRow("World", activeWorldLabel(st), MUTED) { openWorldsPanel() }
+            addView(tv("Reinstalls. World kept.", 11.5f, FAINT),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(12f) })
-            panelBtn("Cambiar versión", Style.PRIMARY) { openVersionPicker(sval(st, "loader"), version) }
+            panelBtn("Change", Style.PRIMARY) { openVersionPicker(sval(st, "loader"), version) }
         }
     }
 
@@ -1161,8 +1156,8 @@ class MainActivity : Activity() {
         var picked: String? = null
         var dlgRef: Dialog? = null
         val reinstallBtn = Button(this).apply { isAllCaps = false; isEnabled = false; alpha = 0.45f }
-        dlgRef = panel("Nueva versión") {
-            addView(tv("Cargando versiones…", 13f, MUTED))
+        dlgRef = panel("Version") {
+            addView(tv("Loading…", 13f, MUTED))
             addView(ScrollView(this@MainActivity).apply { addView(list) },
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
             styleBtn(reinstallBtn, Style.PRIMARY, "Reinstalar", false)
@@ -1185,7 +1180,7 @@ class MainActivity : Activity() {
             }.filter { mcAtLeast(it, "1.17") }.take(20)
             list.removeAllViews()
             if (versions.isEmpty()) {
-                list.addView(tv("Sin conexión. Inténtalo más tarde.", 12.5f, WARN))
+                list.addView(tv("No connection.", 12.5f, WARN))
                 return@launch
             }
             versions.forEach { v ->
@@ -1207,16 +1202,16 @@ class MainActivity : Activity() {
                 }
                 row.tag = v
                 row.addView(tv(v, 14.5f, TEXT, bold = sel, mono = true), LinearLayout.LayoutParams(0, -2, 1f))
-                if (sel) row.addView(tv("Actual", 10.5f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
+                if (sel) row.addView(tv("Current", 10.5f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
                 list.addView(row, LinearLayout.LayoutParams(-1, px(48f)).apply { bottomMargin = px(8f) })
             }
         }
     }
 
     private fun confirmReinstall(loader: String, version: String) {
-        panel("¿Reinstalar?") {
-            addView(tv("$loader $version\nEl mundo y los respaldos se conservan.", 13.5f, TEXT).apply { setLineSpacing(px(2f).toFloat(), 0f) })
-            panelBtn("Reinstalar", Style.PRIMARY) {
+        panel("Reinstall?") {
+            addView(tv("$loader $version", 13.5f, TEXT).apply { setLineSpacing(px(2f).toFloat(), 0f) })
+            panelBtn("Reinstall", Style.PRIMARY) {
                 reinstalling = true
                 wizard = "installing"
                 render()
@@ -1235,11 +1230,11 @@ class MainActivity : Activity() {
             val arr = st?.optJSONArray("worlds")
             val running = st?.optBoolean("running") == true
             runOnUiThread {
-                panel("Mundos") {
-                    if (running) addView(tv("Apaga el servidor para cambiar o borrar mundos.", 12f, WARN),
+                panel("Worlds") {
+                    if (running) addView(tv("Stop server to manage.", 12f, WARN),
                         LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(8f) })
                     if (arr == null || arr.length() == 0) {
-                        addView(tv("Todavía no hay mundos.", 13f, MUTED))
+                        addView(tv("No worlds.", 13f, MUTED))
                     } else {
                         for (i in 0 until arr.length()) {
                             val w = arr.optJSONObject(i) ?: continue
@@ -1253,18 +1248,18 @@ class MainActivity : Activity() {
                             r.addView(tv(name, 14.5f, TEXT, bold = true, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE },
                                 LinearLayout.LayoutParams(0, -2, 1f))
                             if (active) {
-                                r.addView(tv("Activo", 11f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
+                                r.addView(tv("Active", 11f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
                             } else {
-                                r.addView(tv("Usar", 13f, ACCENT, bold = true).apply {
+                                r.addView(tv("Use", 13f, ACCENT, bold = true).apply {
                                     setPadding(px(12f), px(12f), px(8f), px(12f))
                                     setOnClickListener {
-                                        if (running) { toast("Apaga el servidor primero."); return@setOnClickListener }
+                                        if (running) { toast("Stop server."); return@setOnClickListener }
                                         runTermux("world-use", name)
-                                        toast("$name se usará al arrancar.")
+                                        toast("Active on restart.")
                                         scope.launch { delay(800); if (tab == Tab.HOME) render() }
                                     }
                                 }, LinearLayout.LayoutParams(-2, -2))
-                                r.addView(tv("Quitar", 13f, DANGER, bold = true).apply {
+                                r.addView(tv("Delete", 13f, DANGER, bold = true).apply {
                                     setPadding(px(8f), px(12f), 0, px(12f))
                                     setOnClickListener { confirmWorldDelete(name) }
                                 }, LinearLayout.LayoutParams(-2, -2))
@@ -1272,41 +1267,40 @@ class MainActivity : Activity() {
                             addView(r, LinearLayout.LayoutParams(-1, px(52f)).apply { topMargin = px(8f) })
                         }
                     }
-                    panelBtn("Nuevo mundo", Style.SECONDARY) { openNewWorldPanel() }
+                    panelBtn("New world", Style.SECONDARY) { openNewWorldPanel() }
                 }
             }
         }
     }
 
     private fun confirmWorldDelete(name: String) {
-        panel("¿Quitar mundo?") {
-            addView(tv("$name y todo su contenido se eliminarán.", 13.5f, TEXT))
-            panelBtn("Quitar", Style.DANGER) {
+        panel("Delete world?") {
+            addView(tv(name, 13.5f, TEXT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
+            panelBtn("Delete", Style.DANGER) {
                 runTermux("world-delete", name)
-                toast("Mundo eliminado.")
+                toast("Deleted.")
                 scope.launch { delay(800); if (tab == Tab.HOME) render() }
             }
-            panelBtn("Cancelar", Style.GHOST) {}
+            panelBtn("Cancel", Style.GHOST) {}
         }
     }
 
     /** Un mundo nuevo = cambiar level-name; el servidor lo genera al arrancar. */
     private fun openNewWorldPanel() {
         val input = EditText(this).apply {
-            hint = "nombre-del-mundo"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
+            hint = "Name"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
-        panel("Nuevo mundo") {
-            addView(tv("El servidor lo genera la primera vez que arranca.", 12f, MUTED))
+        panel("New world") {
             addView(input, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(8f) })
-            panelBtn("Crear", Style.PRIMARY) {
+            panelBtn("Create", Style.PRIMARY) {
                 val n = input.text.toString().trim()
-                if (!n.matches(Regex("[A-Za-z0-9_ -]+")) || n.isEmpty()) { toast("Nombre inválido."); return@panelBtn }
-                if (readState()?.optBoolean("running") == true) { toast("Apaga el servidor primero."); return@panelBtn }
+                if (!n.matches(Regex("[A-Za-z0-9_ -]+")) || n.isEmpty()) { toast("Invalid name."); return@panelBtn }
+                if (readState()?.optBoolean("running") == true) { toast("Stop server."); return@panelBtn }
                 runTermux("prop", "level-name", n.replace(" ", "_"))
-                toast("$n será el mundo activo.")
+                toast("Active on restart.")
                 scope.launch { delay(800); if (tab == Tab.HOME) render() }
             }
         }
@@ -1315,9 +1309,9 @@ class MainActivity : Activity() {
     // ── panel: respaldos (crear, restaurar, borrar) ─────────────────
     private fun openBackupsPanel() {
         val backups = File(Embed.home(this), "mc_backups").listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
-        panel("Respaldos") {
+        panel("Backups") {
             if (backups.isEmpty()) {
-                addView(tv("Sin respaldos todavía.", 13f, MUTED))
+                addView(tv("No backups.", 13f, MUTED))
             } else {
                 backups.forEach { f ->
                     val kb = f.length() / 1024
@@ -1331,90 +1325,82 @@ class MainActivity : Activity() {
                     txt.addView(tv(f.name, 13f, TEXT, bold = true, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
                     txt.addView(tv(kbS, 11f, FAINT))
                     r.addView(txt, LinearLayout.LayoutParams(0, -2, 1f))
-                    r.addView(tv("Restaurar", 13f, ACCENT, bold = true).apply {
+                    r.addView(tv("Restore", 13f, ACCENT, bold = true).apply {
                         setPadding(px(10f), px(12f), px(6f), px(12f))
                         setOnClickListener { confirmBackupRestore(f.name) }
                     }, LinearLayout.LayoutParams(-2, -2))
-                    r.addView(tv("Quitar", 13f, DANGER, bold = true).apply {
+                    r.addView(tv("Delete", 13f, DANGER, bold = true).apply {
                         setPadding(px(6f), px(12f), 0, px(12f))
                         setOnClickListener { confirmBackupDelete(f.name) }
                     }, LinearLayout.LayoutParams(-2, -2))
                     addView(r, LinearLayout.LayoutParams(-1, px(56f)).apply { topMargin = px(8f) })
                 }
             }
-            panelBtn("Crear respaldo", Style.PRIMARY) {
-                runTermux("backup"); toast("Respaldo en proceso…")
+            panelBtn("Create backup", Style.PRIMARY) {
+                runTermux("backup"); toast("Creating…")
             }
-            addView(tv("Máximo 5 copias. Restaurar reemplaza el mundo actual (servidor apagado).", 11f, FAINT),
+            addView(tv("Max 5. Restore replaces world.", 11f, FAINT),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         }
     }
 
     private fun confirmBackupRestore(name: String) {
-        panel("¿Restaurar respaldo?") {
-            addView(tv("El mundo actual se reemplazará por $name.\nApaga el servidor antes de restaurar.", 13.5f, TEXT))
-            panelBtn("Restaurar", Style.PRIMARY) {
+        panel("Restore?") {
+            addView(tv(name, 13.5f, TEXT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
+            panelBtn("Restore", Style.PRIMARY) {
                 runTermux("backup-restore", name)
-                toast("Restaurando…")
+                toast("Restoring…")
             }
-            panelBtn("Cancelar", Style.GHOST) {}
+            panelBtn("Cancel", Style.GHOST) {}
         }
     }
 
     private fun confirmBackupDelete(name: String) {
-        panel("¿Quitar respaldo?") {
-            addView(tv("$name se eliminará para siempre.", 13.5f, TEXT))
-            panelBtn("Quitar", Style.DANGER) {
+        panel("Delete backup?") {
+            addView(tv(name, 13.5f, TEXT, mono = true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.MIDDLE })
+            panelBtn("Delete", Style.DANGER) {
                 runTermux("backup-delete", name)
-                toast("Respaldo eliminado.")
+                toast("Deleted.")
             }
-            panelBtn("Cancelar", Style.GHOST) {}
+            panelBtn("Cancel", Style.GHOST) {}
         }
     }
 
     // ── diálogo: dirección manual del túnel ──────────────────────────
     private fun openAddressDialog() {
+        var dlgRef: Dialog? = null
         val input = EditText(this).apply {
-            hint = "xxx.tun.ply.gg o xxx.ply.gg:1234"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
+            hint = "xxx.tun.ply.gg"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
-        val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(6f), 0, px(2f)) }
-        wrap.addView(tv("Dirección pública de playit.gg, con o sin puerto.", 12f, MUTED))
-        wrap.addView(input, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(8f) })
-        AlertDialog.Builder(this)
-            .setTitle("Dirección del túnel")
-            .setView(ScrollView(this).apply { addView(wrap) })
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Guardar") { _, _ ->
-                // B2: accept `host`, `host:puerto`, and pasted URLs; strip
-                // scheme/path/query, validate the rest (host + optional port).
+        dlgRef = panel("Tunnel address") {
+            addView(input, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(8f) })
+            panelBtn("Save", Style.PRIMARY) {
                 var v = input.text.toString().trim()
                 v = v.substringAfter("://", v).substringBefore('/').substringBefore('?')
-                if (v.isEmpty()) { toast("Formato host o host:puerto."); return@setPositiveButton }
                 val host: String
-                var port: String? = null
                 val parts = v.split(':')
                 if (parts.size > 1) {
-                    // host:puerto, or host:puerto:extra (stray suffix from copy-paste)
                     host = parts[0]
-                    port = parts[1]
-                    val p = port.toIntOrNull()
-                    if (host.isEmpty() || p == null || p !in 1..65535) {
-                        toast("Formato host o host:puerto (puerto 1-65535).")
-                        return@setPositiveButton
+                    val p = parts[1].toIntOrNull()
+                    if (host.isEmpty() || p == null || p !in 1..65535 || !Regex("[A-Za-z0-9._-]+").matches(host)) {
+                        toast("Host o host:puerto."); return@panelBtn
                     }
-                    v = "$host:$port"
-                } else host = v
-                if (!Regex("[A-Za-z0-9._-]+").matches(host)) {
-                    toast("Host inválido (ej. xxx.tun.ply.gg).")
-                    return@setPositiveButton
+                    v = "$host:$p"
+                } else {
+                    host = v
+                    if (host.isEmpty() || !Regex("[A-Za-z0-9._-]+").matches(host)) {
+                        toast("Host o host:puerto."); return@panelBtn
+                    }
                 }
+                dlgRef?.dismiss()
                 runTermux("playit-address", v)
-                toast("Dirección guardada.")
+                toast("Saved.")
                 scope.launch { delay(1200); render() }
-            }.show()
+            }
+        }
     }
 
     // ── diálogo: cambiar RAM ──────────────────────────────────────────
@@ -1427,20 +1413,20 @@ class MainActivity : Activity() {
         }
         val minE = field(sval(st, "ram_min"))
         val maxE = field(sval(st, "ram_max"))
-        panel("RAM del servidor") {
-            addView(tv("Mínima", 12f, MUTED))
+        panel("RAM") {
+            addView(tv("Mín", 12f, MUTED))
             addView(minE, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(4f); bottomMargin = px(12f) })
-            addView(tv("Máxima", 12f, MUTED))
+            addView(tv("Máx", 12f, MUTED))
             addView(maxE, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(4f) })
-            addView(tv("Ejemplos: 512M, 1G, 2G, 1500M. La mínima es lo que reserva al arrancar; la máxima, el techo.", 11.5f, FAINT),
+            addView(tv("Ej: 512M, 1G, 2G.", 11.5f, FAINT),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(12f) })
             panelBtn("Guardar", Style.PRIMARY) {
                 val min = minE.text.toString().trim()
                 val max = maxE.text.toString().trim()
                 val ok = Regex("[0-9]+[MG]").matches(min) && Regex("[0-9]+[MG]").matches(max)
-                if (!ok) { toast("Formato inválido (ej. 512M o 1G)."); return@panelBtn }
+                if (!ok) { toast("Formato: 512M o 1G."); return@panelBtn }
                 runTermux("ram-set", min, max)
-                toast("Guardado: aplica al reiniciar el servidor.")
+                toast("Guardado.")
                 scope.launch { delay(1200); if (tab == Tab.SETTINGS) render() }
             }
         }
@@ -1460,32 +1446,32 @@ class MainActivity : Activity() {
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
-        val gamemode = field("survival, creative, adventure, spectator", "gamemode")
-        val difficulty = field("peaceful, easy, normal, hard", "difficulty")
-        val maxPlayers = field("Número de jugadores", "max-players")
-        val pvp = field("true o false", "pvp")
-        val viewDistance = field("Distancia de visión", "view-distance")
-        val motd = field("Mensaje que ven al buscar tu servidor", "motd")
-        val online = field("true o false (true = solo cuentas premium)", "online-mode")
+        val gamemode = field("survival…", "gamemode")
+        val difficulty = field("peaceful…", "difficulty")
+        val maxPlayers = field("20", "max-players")
+        val pvp = field("true/false", "pvp")
+        val viewDistance = field("10", "view-distance")
+        val motd = field("MOTD", "motd")
+        val online = field("true/false", "online-mode")
         val extra = EditText(this).apply {
-            hint = "clave=valor (p. ej. spawn-protection=0)"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
+            hint = "clave=valor"; setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
-        panel("Propiedades del servidor") {
+        panel("Propiedades") {
             fun row(lbl: String, et: EditText) {
                 addView(tv(lbl, 12f, MUTED).apply { setPadding(0, px(10f), 0, 0) })
                 addView(et, LinearLayout.LayoutParams(-1, px(44f)).apply { topMargin = px(4f) })
             }
-            row("Modo de juego", gamemode)
-            row("Dificultad", difficulty)
-            row("Jugadores máximos", maxPlayers)
+            row("Gamemode", gamemode)
+            row("Difficulty", difficulty)
+            row("Max players", maxPlayers)
             row("PvP", pvp)
-            row("Distancia de visión", viewDistance)
-            row("Mensaje (MOTD)", motd)
-            row("Modo online", online)
-            row("Cualquier otra propiedad", extra)
+            row("View distance", viewDistance)
+            row("MOTD", motd)
+            row("Online mode", online)
+            row("Extra", extra)
             panelBtn("Guardar", Style.PRIMARY) {
                 val pairs = mutableListOf<String>()
                 fun put(v: String, k: String) { if (v.isNotEmpty()) { pairs.add(k); pairs.add(v) } }
@@ -1499,12 +1485,12 @@ class MainActivity : Activity() {
                 val ex = extra.text.toString().trim()
                 if (ex.isNotEmpty()) {
                     val i = ex.indexOf('=')
-                    if (i <= 0) { toast("Propiedad extra: usa formato clave=valor."); return@panelBtn }
+                    if (i <= 0) { toast("Usa clave=valor."); return@panelBtn }
                     pairs.add(ex.substring(0, i).trim()); pairs.add(ex.substring(i + 1).trim())
                 }
-                if (pairs.isEmpty()) { toast("No hay nada que guardar."); return@panelBtn }
+                if (pairs.isEmpty()) return@panelBtn
                 runTermux("prop", *pairs.toTypedArray())
-                toast("Guardado: aplica al reiniciar el servidor.")
+                toast("Guardado.")
             }
         }
     }
@@ -1524,26 +1510,26 @@ class MainActivity : Activity() {
     }
 
     private fun confirmDelete() {
+        var dlgRef: Dialog? = null
         val input = EditText(this).apply {
-            hint = "Escribe BORRAR"
+            hint = "BORRAR"
             setTextColor(TEXT); setHintTextColor(FAINT); textSize = 15f
             setBackgroundColor(Color.TRANSPARENT)
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
         }
-        AlertDialog.Builder(this)
-            .setTitle("¿Borrar el servidor?")
-            .setMessage("Se eliminará todo el mundo. Para confirmar, escribe BORRAR.")
-            .setView(input)
-            .setNegativeButton("Cancelar", null)
-            .setPositiveButton("Borrar") { _, _ ->
+        dlgRef = panel("Borrar servidor?") {
+            addView(input, LinearLayout.LayoutParams(-1, px(48f)).apply { topMargin = px(8f) })
+            panelBtn("Borrar", Style.DANGER) {
                 if (input.text.toString() == "BORRAR") {
-                    if (actionBusy) { toast("Espera a que termine la acción actual."); return@setPositiveButton }
+                    if (actionBusy) { toast("Wait…"); return@panelBtn }
+                    dlgRef?.dismiss()
                     runWithBusy("delete", "Borrando…", { runTermux("server-delete") },
                         { readState()?.optBoolean("installed") != true })
-                } else toast("Texto incorrecto.")
+                } else toast("Escribe BORRAR.")
             }
-            .show()
+            panelBtn("Cancelar", Style.GHOST) {}
+        }
     }
 
     // ═══════════════════════ ASISTENTE (sin servidor) ═══════════════
@@ -1569,10 +1555,9 @@ class MainActivity : Activity() {
 
         if (!storageOk) {
             col.addCard {
-                addView(tv("Acceso a archivos", 11f, FAINT, bold = true, ls = 0.06f))
+                addView(tv("Archivos", 11f, FAINT, bold = true, ls = 0.06f))
                 addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
-                addView(tv("Tus mundos y respaldos viven en una carpeta del teléfono.", 13f, TEXT))
-                addBtn("Conceder acceso a archivos", Style.PRIMARY, marginTop = 12f) {
+                addBtn("Conceder acceso", Style.PRIMARY, marginTop = 12f) {
                     requestStorage()
                 }
             }
@@ -1614,7 +1599,7 @@ class MainActivity : Activity() {
             }
         } else if (!toolsOk) {
             col.addCard(marginTop = 10f) {
-                addView(tv("Preparación inicial", 11f, FAINT, bold = true, ls = 0.06f))
+                addView(tv("Setup", 11f, FAINT, bold = true, ls = 0.06f))
                 addView(View(this@MainActivity), LinearLayout.LayoutParams(-1, px(10f)))
                 addBtn("Preparar", Style.SECONDARY, marginTop = 10f) {
                     clearError()
@@ -1627,24 +1612,24 @@ class MainActivity : Activity() {
 
         if (!ready) {
             val hint = when {
-                !storageOk -> "Falta el acceso a archivos."
-                else -> "Termina la preparación para continuar."
+                !storageOk -> "Falta acceso."
+                else -> "Termina la preparación."
             }
             col.addView(tv(hint, 12.5f, WARN),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(14f); gravity = Gravity.CENTER })
         }
-        col.addBtn(if (ready) "Crear mi servidor" else "Esperando preparación…",
+        col.addBtn(if (ready) "Crear servidor" else "Preparando…",
             Style.PRIMARY, enabled = ready, marginTop = 16f) {
             wizard = "loader"
             render()
         }
         if (!ready && hasError(readState())) {
-            col.addBtn("Ver registro", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Última ejecución", lastRunLog) }
+            col.addBtn("Ver log", Style.GHOST, height = 42f, marginTop = 4f) { showLogDialog("Log", lastRunLog) }
         }
     }
 
     private fun setupLoader(col: LinearLayout) {
-        col.addHeader("¿Qué tipo de servidor?")
+        col.addHeader("Servidor")
         val loaders = listOf(
             "paper" to "Paper",
             "fabric" to "Fabric",
@@ -1661,7 +1646,7 @@ class MainActivity : Activity() {
             }
             val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             head.addView(tv(name, 17f, TEXT, bold = true), LinearLayout.LayoutParams(0, -2, 1f))
-            head.addView(tv(if (sel) "Seleccionado" else if (id == "paper") "Recomendado" else "", 11f, if (sel) ACCENT else FAINT, bold = true),
+            if (!sel && id == "paper") head.addView(tv("Recomendado", 11f, FAINT, bold = true),
                 LinearLayout.LayoutParams(-2, -2))
             c.addView(head)
             col.addView(c, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
@@ -1675,16 +1660,16 @@ class MainActivity : Activity() {
     }
 
     private fun setupVersion(col: LinearLayout) {
-        col.addHeader("Versión de Minecraft")
+        col.addHeader("Versión")
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val manual = EditText(this).apply {
-            hint = "…o escribe una versión exacta (ej. 1.20.1)"
+            hint = "1.20.1"
             setTextColor(TEXT); setHintTextColor(FAINT); textSize = 14f
             background = rounded(SURFACE, RADIUS_SM, STROKE, 1)
             setPadding(px(12f), 0, px(12f), 0)
             setSingleLine(true)
         }
-        list.addView(tv("Cargando versiones…", 13f, MUTED))
+        list.addView(tv("Cargando…", 13f, MUTED))
         col.addView(list, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
         col.addView(manual, LinearLayout.LayoutParams(-1, px(46f)).apply { topMargin = px(10f) })
 
@@ -1709,7 +1694,7 @@ class MainActivity : Activity() {
             }.filter { mcAtLeast(it, "1.17") }.take(60)
             list.removeAllViews()
             if (versions.isEmpty()) {
-                list.addView(tv("Sin conexión ahora mismo. Escribe la versión manualmente.", color = WARN))
+                list.addView(tv("Sin conexión.", color = WARN))
                 return@launch
             }
             versions.forEachIndexed { i, v ->
@@ -1722,7 +1707,7 @@ class MainActivity : Activity() {
                     setOnClickListener { pick(v) }
                 }
                 row.addView(tv(v, 15f, TEXT, bold = rec, mono = true), LinearLayout.LayoutParams(0, -2, 1f))
-                if (rec) row.addView(tv("Más reciente", 10f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
+                if (rec) row.addView(tv("Reciente", 10f, ACCENT, bold = true), LinearLayout.LayoutParams(-2, -2))
                 row.tag = v
                 list.addView(row, LinearLayout.LayoutParams(-1, px(48f)).apply { bottomMargin = px(8f) })
             }
@@ -1731,7 +1716,7 @@ class MainActivity : Activity() {
             val typed = manual.text.toString().trim()
             val v = wizardVersion ?: typed
             if (!v.matches(Regex("""1\.\d+(\.\d+)?""")) || !mcAtLeast(v, "1.17")) {
-                toast("Elige o escribe una versión válida (1.17 o superior).")
+                toast("Versión 1.17+.")
                 return@addBtn
             }
             wizardVersion = v
@@ -1753,10 +1738,10 @@ class MainActivity : Activity() {
             addInfo("Tipo", if (wizardLoader == "paper") "Plugins" else "Mods")
         }
         if (total < 3072) {
-            col.addView(tv("Poca RAM: puede ir lento.", 12.5f, WARN),
+            col.addView(tv("Poca RAM.", 12.5f, WARN),
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(10f) })
         }
-        col.addBtn("Instalar servidor", Style.PRIMARY, marginTop = 18f) {
+        col.addBtn("Instalar", Style.PRIMARY, marginTop = 18f) {
             clearError()
             reinstalling = false
             wizard = "installing"
@@ -1807,7 +1792,7 @@ class MainActivity : Activity() {
                 progressBackgroundTintList = android.content.res.ColorStateList.valueOf(STROKE)
             }
         }
-        val detail = tv("Descargando e instalando…", 12.5f, MUTED).apply { gravity = Gravity.CENTER }
+        val detail = tv("", 12.5f, MUTED).apply { gravity = Gravity.CENTER }
         col.addCard {
             addView(done, LinearLayout.LayoutParams(-1, -2))
             addView(detail, LinearLayout.LayoutParams(-1, -2).apply { topMargin = px(8f) })
